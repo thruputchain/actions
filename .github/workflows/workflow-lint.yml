@@ -14,6 +14,11 @@ name: Workflow lint
 on:
   workflow_call:
     inputs:
+      lint-app-id:
+        description: "Optional Thruput App ID for private Actions audits."
+        type: string
+        required: false
+        default: ""
       runs-on:
         description: "Runner label. Must be Linux x86-64."
         type: string
@@ -66,6 +71,9 @@ on:
         required: false
         default: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
     secrets:
+      lint-app-private-key:
+        description: "Private key for the App identified by lint-app-id."
+        required: false
       lint-token:
         # See `run-zizmor` above for purpose
         description: >-
@@ -169,11 +177,22 @@ jobs:
           "$bin/actionlint" --version
           "$bin/zizmor" --version
 
+      - name: Generate private Actions audit token
+        if: inputs.lint-app-id != '' && inputs.run-zizmor
+        id: lint-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.lint-app-id }}
+          private-key: ${{ secrets.lint-app-private-key }}
+          owner: thruputchain
+          repositories: actions
+          permission-contents: read
+
       - name: Lint
         env:
-          # Falls back to github.token, which suffices unless a private
-          # repository is referenced cross-repo. See the lint-token secret.
-          GH_TOKEN: ${{ secrets.lint-token || github.token }}
+          # The App token reads only thruputchain/actions and is revoked
+          # by the token action after the job. Other callers retain their token.
+          GH_TOKEN: ${{ steps.lint-app-token.outputs.token || secrets.lint-token || github.token }}
           ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
           RUN_ZIZMOR: ${{ inputs.run-zizmor }}
           SHELLCHECK_SCRIPTS: ${{ inputs.shellcheck-scripts }}
