@@ -1,0 +1,145 @@
+name: 'Cargo Version Tag'
+description: 'Parses Cargo.toml, validates workspace crate versions match, and creates a git tag'
+author: 'Groundhog Team'
+
+inputs:
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  tag-prefix:
+    description: 'Prefix for the git tag (default: "v")'
+    required: false
+    default: 'v'
+  fail-if-exists:
+    description: 'Fail if the tag already exists at a different commit (default: true). A tag that already points at HEAD is never an error.'
+    required: false
+    default: 'true'
+  packages:
+    description: 'Space-separated list of package names to validate versions for. If not provided, all workspace packages will be checked.'
+    required: false
+
+outputs:
+  version:
+    description: 'The version extracted from Cargo.toml'
+    value: ${{ steps.extract-version.outputs.version }}
+  tag:
+    description: 'The full git tag name created'
+    value: ${{ steps.create-tag.outputs.tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract and validate version
+      id: extract-version
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Extracting version from $CARGO_TOML_PATH..."
+
+        # Get reference version
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+
+        if [ -n "$PACKAGES_INPUT" ]; then
+          # Use the first specified package's version as the reference
+          FIRST_PACKAGE=$(echo "$PACKAGES_INPUT" | awk '{print $1}')
+          ROOT_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$FIRST_PACKAGE" \
+            '.packages[] | select(.name == $pkg) | .version')
+        else
+          ROOT_VERSION=$(echo "$METADATA" | jq -r '.packages[] | select(.manifest_path | endswith("Cargo.toml")) | .version' | head -1)
+        fi
+
+        if [ -z "$ROOT_VERSION" ]; then
+          echo "ERROR: Could not extract version from $CARGO_TOML_PATH"
+          exit 1
+        fi
+
+        echo "Root workspace version: $ROOT_VERSION"
+
+        # Determine which packages to validate
+        if [ -n "$PACKAGES_INPUT" ]; then
+          echo "Validating specified packages: $PACKAGES_INPUT"
+          PACKAGES_TO_CHECK="$PACKAGES_INPUT"
+          
+          # Validate that all provided packages exist in workspace
+          ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+          for package in $PACKAGES_TO_CHECK; do
+            if ! echo "$ALL_PACKAGES" | grep -q "^${package}$"; then
+              echo "ERROR: Package '$package' not found in workspace"
+              exit 1
+            fi
+          done
+        else
+          echo "Validating all workspace crate versions..."
+          PACKAGES_TO_CHECK=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        # Check if all versions match
+        MISMATCHED=false
+        for package_name in $PACKAGES_TO_CHECK; do
+          PACKAGE_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | .version')
+
+          if [ "$PACKAGE_VERSION" != "$ROOT_VERSION" ]; then
+            echo "ERROR: Package '$package_name' has version $PACKAGE_VERSION, expected $ROOT_VERSION"
+            MISMATCHED=true
+          else
+            echo "OK: Package '$package_name' version matches: $PACKAGE_VERSION"
+          fi
+        done
+
+        if [ "$MISMATCHED" = true ]; then
+          echo "ERROR: Not all checked crates have the same version!"
+          exit 1
+        fi
+
+        echo "OK: All checked crates have version $ROOT_VERSION"
+        echo "version=$ROOT_VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Create git tag
+      id: create-tag
+      shell: bash
+      env:
+        VERSION: ${{ steps.extract-version.outputs.version }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        FAIL_IF_EXISTS: ${{ inputs.fail-if-exists }}
+      run: |
+        set -euo pipefail
+
+        TAG="${TAG_PREFIX}${VERSION}"
+        echo "Creating git tag: $TAG"
+
+        # Check if tag already exists
+        if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+          # Peel to the commit so annotated tags compare against HEAD too.
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" = "$HEAD_SHA" ]; then
+            # A re-run on the tagged commit: nothing to do.
+            echo "OK: Tag $TAG already exists at this commit ($HEAD_SHA)"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$FAIL_IF_EXISTS" = "true" ]; then
+            echo "ERROR: Tag $TAG already exists at $TAG_SHA, which is not this commit ($HEAD_SHA)!"
+            exit 1
+          else
+            echo "WARNING: Tag $TAG already exists at $TAG_SHA (not this commit, $HEAD_SHA), skipping creation"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+
+        # Create the tag
+        git tag -f "$TAG"
+        echo "OK: Created tag $TAG"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'tag'
+  color: 'blue'

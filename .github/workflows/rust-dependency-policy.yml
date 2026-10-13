@@ -1,0 +1,96 @@
+name: Rust dependency policy
+
+# Reusable: called as
+#   jobs:
+#     dependency-policy:
+#       uses: thruputchain/actions/.github/workflows/rust-dependency-policy.yml@<ref>
+#
+# Policy stays in the calling repository's `deny.toml`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label. Any Linux x86-64 runner."
+        type: string
+        required: false
+        default: ubuntu-latest
+      checks:
+        description: >-
+          cargo-deny checks to run. Empty (default) runs all four and reports
+          each in one summary line.
+        type: string
+        required: false
+        default: ""
+      cargo-deny-version:
+        description: "Exact cargo-deny version to install."
+        type: string
+        required: false
+        default: "0.20.2"
+      toolchain:
+        description: >-
+          RUSTUP_TOOLCHAIN for the check. Defaults to the runner's preinstalled
+          `stable`: cargo-deny doesn't need to compile anything and honouring a
+          repo's rust-toolchain.toml would download a whole toolchain.
+        type: string
+        required: false
+        default: stable
+      registry-name:
+        description: >-
+          Private cargo registry the graph resolves against, as named in
+          .cargo/config.toml.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      registry-token:
+        description: "Token for registry-name. Required only if it is set."
+        required: false
+
+jobs:
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    steps:
+      # The github context inside a reusable workflow refers to the caller,
+      # so this checks out the calling repository.
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-deny@${{ inputs.cargo-deny-version }}
+
+      - name: Check dependency policy
+        env:
+          RUSTUP_TOOLCHAIN: ${{ inputs.toolchain }}
+          CHECKS: ${{ inputs.checks }}
+          REGISTRY_NAME: ${{ inputs.registry-name }}
+          REGISTRY_TOKEN: ${{ secrets.registry-token }}
+        run: |
+          set -euo pipefail
+
+          # Exported inside this step rather than written to GITHUB_ENV, so
+          # the credential does not outlive the command that needs it. cargo
+          # reads CARGO_REGISTRIES_<NAME>_TOKEN, upper-cased, hyphens to
+          # underscores.
+          if [ -n "$REGISTRY_NAME" ]; then
+            if [ -z "$REGISTRY_TOKEN" ]; then
+              echo "::error::registry-name is set but the registry-token secret is empty"
+              exit 1
+            fi
+            suffix="$(printf '%s' "$REGISTRY_NAME" | tr '[:lower:]-' '[:upper:]_')"
+            export "CARGO_REGISTRIES_${suffix}_TOKEN=$REGISTRY_TOKEN"
+            export CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS="cargo:token"
+          fi
+
+          # Graph flags must precede the subcommand; cargo-deny rejects them
+          # after it. CHECKS is unquoted on purpose: empty must expand to no
+          # argument at all, which is how cargo-deny runs every check.
+          # shellcheck disable=SC2086
+          cargo deny --all-features --locked check $CHECKS

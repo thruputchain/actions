@@ -1,0 +1,493 @@
+name: 'Cargo Publish Dry Run'
+description: 'Validates Rust crates by vendoring dependencies, building, testing, and packaging without publishing'
+author: 'Groundhog Team'
+
+inputs:
+  registry-name:
+    description: 'Private registry name as defined in .cargo/config.toml; its dependencies are resolved from vendor/ during verification.'
+    required: false
+    default: 'groundhog'
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names to publish. If not provided, all workspace packages will be processed.'
+    required: false
+  cargo-hack-feature-options:
+    description: 'Feature testing options for cargo-hack (e.g., --feature-powerset)'
+    required: false
+    default: '--feature-powerset'
+  cargo-hack-wasm32-packages:
+    description: 'Space-separated list of package names to test with cargo-hack for wasm32-unknown-unknown target. If empty, the wasm32 step will be skipped.'
+    required: false
+    default: ''
+  cargo-hack-wasm32-feature-options:
+    description: 'Feature testing options for cargo-hack when testing wasm32-unknown-unknown target (e.g., --feature-powerset)'
+    required: false
+    default: '--feature-powerset'
+  cargo-hack-rv32-packages:
+    description: 'Space-separated list of package names to test with cargo-hack for riscv32im-unknown-none-elf target. If empty, the riscv32 step will be skipped.'
+    required: false
+    default: ''
+  cargo-hack-rv32-feature-options:
+    description: 'Feature testing options for cargo-hack when testing riscv32im-unknown-none-elf target (e.g., --feature-powerset)'
+    required: false
+    default: '--feature-powerset'
+  arch-only-packages:
+    description: 'Space-separated list of packages that only build for a specific architecture (e.g. the wasm/rv32 runtimes). These are still vendored (and published by cargo-publish), but are skipped in the host verify step and validated only by the per-target verify steps.'
+    required: false
+    default: ''
+  skip-tests:
+    description: 'Skip running tests'
+    required: false
+    default: 'false'
+  skip-clippy:
+    description: 'Skip clippy checks'
+    required: false
+    default: 'false'
+  skip-fmt:
+    description: 'Skip formatting checks'
+    required: false
+    default: 'false'
+  vendor-workspace-deps:
+    description: 'Space-separated list of workspace packages to pre-vendor (packaged into vendor/ but not tested or published). Use when packages depend on other workspace crates that are already published to a registry.'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Vendor dependencies
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Creating vendor directory..."
+        mkdir -p vendor
+        cargo vendor --versioned-dirs
+        echo "OK: Vendored dependencies to ./vendor/"
+
+    - name: Pre-vendor workspace dependencies
+      if: inputs.vendor-workspace-deps != ''
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        VENDOR_DEPS: ${{ inputs.vendor-workspace-deps }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Pre-vendoring workspace dependencies..."
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+        for package in $VENDOR_DEPS; do
+          echo "Packaging $package for vendoring..."
+          cargo package --no-verify --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH" \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'"
+
+          version=$(echo "$METADATA" | \
+            jq -r --arg pkg "$package" '.packages[] | select(.name == $pkg) | .version')
+
+          tar xzf "target/package/${package}-${version}.crate" -C vendor/
+          echo '{"files":{}}' > "vendor/$package-$version/.cargo-checksum.json"
+          echo "OK: Pre-vendored $package ($version)"
+        done
+        echo "OK: All workspace dependencies pre-vendored"
+
+    - name: List workspace packages
+      id: list-packages
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        WORKSPACE_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+        
+        if [ -n "$PACKAGES_INPUT" ]; then
+          echo "Using provided packages list: $PACKAGES_INPUT"
+          PACKAGES="$PACKAGES_INPUT"
+          
+          # Validate that all provided packages exist and are publishable
+          VALIDATION_FAILED=0
+          for package in $PACKAGES; do
+            # Check if package exists in workspace
+            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+              echo "::error::Package '$package' not found in workspace"
+              VALIDATION_FAILED=1
+              continue
+            fi
+            
+            # Check if package has publish=false (appears as empty array [] in cargo metadata)
+            IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+              '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+            
+            if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+              echo "::error::Package '$package' has publish=false in Cargo.toml and cannot be published"
+              VALIDATION_FAILED=1
+            fi
+          done
+          
+          if [ $VALIDATION_FAILED -eq 1 ]; then
+            echo "::error::One or more provided packages are invalid or have publish disabled"
+            exit 1
+          fi
+        else
+          echo "Discovering workspace packages..."
+          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        echo "Found packages: $PACKAGES"
+        echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+
+    - name: Package crates (dry-run)
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        echo "Packaging crates (dry-run)..."
+        source "$HOME/.cargo/env"
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+
+        # Pre-vendor stub for any package that has a dev-dependency on itself.
+        # cargo package resolves all deps (including dev) against vendored sources,
+        # so a self-referencing crate must already exist in vendor/ before packaging.
+        for package in $PACKAGES; do
+          SELF_DEV_DEP_COUNT=$(echo "$METADATA" | jq --arg pkg "$package" \
+            '[.packages[] | select(.name == $pkg) | .dependencies[] | select(.name == $pkg and .kind == "dev")] | length')
+
+          if [ "$SELF_DEV_DEP_COUNT" -gt 0 ]; then
+            version=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+              '.packages[] | select(.name == $pkg) | .version')
+            vendor_dir="vendor/${package}-${version}"
+
+            if [ ! -d "$vendor_dir" ]; then
+              echo "Creating vendor stub for self-referencing package $package v${version}..."
+              EDITION=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+                '.packages[] | select(.name == $pkg) | .edition')
+              # List all feature names with empty deps - enough for dependency resolution
+              FEATURES_TOML=$(echo "$METADATA" | jq -r --arg pkg "$package" '
+                .packages[] | select(.name == $pkg) | .features | keys |
+                if length > 0 then
+                  "\n[features]\n" + (map(. + " = []") | join("\n"))
+                else "" end')
+
+              mkdir -p "$vendor_dir/src"
+              printf '[package]\nname = "%s"\nversion = "%s"\nedition = "%s"\n%s\n' \
+                "$package" "$version" "$EDITION" "$FEATURES_TOML" > "$vendor_dir/Cargo.toml"
+              touch "$vendor_dir/src/lib.rs"
+              echo '{"files":{}}' > "$vendor_dir/.cargo-checksum.json"
+              echo "OK: Created vendor stub for $package"
+            fi
+          fi
+        done
+
+        # Package all crates and extract to vendor
+        for package in $PACKAGES; do
+          echo "Packaging $package..."
+          cargo package --no-verify --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH" \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'"
+
+          echo "Extracting $package to vendor..."
+          version=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | .version')
+
+          path="target/package/${package}-${version}.crate"
+          tar xzf "$path" -C vendor/
+          echo '{"files":{}}' > "vendor/$package-$version/.cargo-checksum.json"
+
+          echo "OK: Package $package extracted to vendor"
+        done
+
+        echo "OK: All packages created successfully"
+
+    - name: Verify packages with features
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        CARGO_HACK_OPTIONS: ${{ inputs.cargo-hack-feature-options }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Verifying packages with cargo-hack ($CARGO_HACK_OPTIONS)..."
+        for package in $PACKAGES; do
+          # Architecture-only crates (e.g. the wasm/rv32 runtimes) can't build
+          # for the host; they are verified by the per-target steps below.
+          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+            echo "Skipping $package on host (architecture-only; verified on its target)"
+            continue
+          fi
+          echo "Verifying $package with cargo-hack..."
+          cargo hack $CARGO_HACK_OPTIONS \
+            --ignore-private \
+            --offline \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'" \
+            package \
+            --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH"
+          echo "OK: Package $package verified"
+        done
+        echo "OK: All feature combinations verified in offline mode"
+
+    - name: Verify packages with features (wasm32-unknown-unknown)
+      if: inputs.cargo-hack-wasm32-packages != ''
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        CARGO_HACK_WASM32_OPTIONS: ${{ inputs.cargo-hack-wasm32-feature-options }}
+        WASM32_PACKAGES: ${{ inputs.cargo-hack-wasm32-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Verifying wasm32 packages with cargo-hack ($CARGO_HACK_WASM32_OPTIONS)..."
+        for package in $WASM32_PACKAGES; do
+          echo "Verifying $package with cargo-hack for wasm32-unknown-unknown..."
+          cargo hack $CARGO_HACK_WASM32_OPTIONS \
+            --target wasm32-unknown-unknown \
+            --ignore-private \
+            --offline \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'" \
+            package \
+            --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH"
+          echo "OK: Package $package verified for wasm32-unknown-unknown"
+        done
+        echo "OK: All wasm32 feature combinations verified in offline mode"
+
+    - name: Verify packages with features (riscv32im-unknown-none-elf)
+      if: inputs.cargo-hack-rv32-packages != ''
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        CARGO_HACK_RV32_OPTIONS: ${{ inputs.cargo-hack-rv32-feature-options }}
+        RV32_PACKAGES: ${{ inputs.cargo-hack-rv32-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Verifying riscv32 packages with cargo-hack ($CARGO_HACK_RV32_OPTIONS)..."
+        for package in $RV32_PACKAGES; do
+          echo "Verifying $package with cargo-hack for riscv32im-unknown-none-elf..."
+          cargo hack $CARGO_HACK_RV32_OPTIONS \
+            --target riscv32im-unknown-none-elf \
+            --ignore-private \
+            --offline \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'" \
+            package \
+            --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH"
+          echo "OK: Package $package verified for riscv32im-unknown-none-elf"
+        done
+        echo "OK: All riscv32 feature combinations verified in offline mode"
+
+    - name: Publish dry-run
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Running publish dry-run..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+
+        for package in $PACKAGES; do
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+          
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package has publish=false, skipping publish dry-run"
+            continue
+          fi
+          
+          echo "Dry-run publish for $package..."
+          # Uses --no-verify to skip rebuilding; that's already checked in the previous steps
+          cargo publish --dry-run --no-verify --package "$package" \
+            --manifest-path "$CARGO_TOML_PATH" \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'"
+        done
+
+        echo "OK: Publish dry-run passed for all packages"
+
+    - name: Check formatting
+      if: inputs.skip-fmt != 'true'
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Checking code formatting..."
+        for package in $PACKAGES; do
+          echo "Checking formatting for $package..."
+          cargo fmt --manifest-path "$CARGO_TOML_PATH" --package "$package" -- --check
+          echo "OK: Package $package formatting check passed"
+        done
+        echo "OK: Formatting check passed"
+
+    - name: Run clippy
+      if: inputs.skip-clippy != 'true'
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        # Self-hosted runners may have a toolchain without the clippy
+        # component; adding it is a no-op when already installed.
+        rustup component add clippy
+        echo "Running clippy..."
+        for package in $PACKAGES; do
+          # Architecture-only crates can't build for the host; clippy on their
+          # target is covered by the per-target cargo-hack verify steps above.
+          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+            echo "SKIP: Package $package is architecture-only, skipping host clippy"
+            continue
+          fi
+          echo "Running clippy for $package..."
+          cargo clippy --manifest-path "$CARGO_TOML_PATH" --package "$package" --all-features \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'" \
+            -- -D warnings
+          echo "OK: Package $package clippy passed"
+        done
+        echo "OK: Clippy passed in offline mode"
+
+    - name: Validate required metadata fields
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Validating required metadata fields..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+
+        METADATA_MISSING_FOUND=0
+        MISSING_METADATA=""
+
+        REQUIRED_FIELDS=("license" "description" "repository")
+
+        for package_name in $PACKAGES; do
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package_name has publish=false, skipping metadata validation"
+            continue
+          fi
+
+          echo "Checking package: $package_name"
+
+          for field in "${REQUIRED_FIELDS[@]}"; do
+            FIELD_VALUE=$(echo "$METADATA" | jq -r --arg pkg "$package_name" --arg field "$field" \
+              '.packages[] | select(.name == $pkg) | .[$field]')
+
+            if [ "$FIELD_VALUE" = "null" ] || [ -z "$FIELD_VALUE" ]; then
+              echo "::error::MISSING METADATA in package '$package_name'!"
+              echo "::error::  Missing required field: $field"
+              METADATA_MISSING_FOUND=1
+              MISSING_METADATA="${MISSING_METADATA}  - $package_name: missing '$field'\n"
+            else
+              echo "  OK: $field = $FIELD_VALUE"
+            fi
+          done
+        done
+
+        if [ $METADATA_MISSING_FOUND -eq 1 ]; then
+          echo "::error::REQUIRED METADATA MISSING!"
+          echo "::error::"
+          echo "::error::The following packages are missing required metadata fields:"
+          echo -e "::error::$MISSING_METADATA"
+          echo "::error::"
+          echo "::error::Please add the following fields to each package's Cargo.toml:"
+          echo "::error::  license = \"MIT\" (or \"Apache-2.0\" or \"MIT OR Apache-2.0\")"
+          echo "::error::  description = \"A short description of the package\""
+          echo "::error::  repository = \"https://github.com/your-org/your-repo\""
+          exit 1
+        fi
+
+        echo "OK: All publishable packages have required metadata!"
+
+    - name: Build documentation
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        echo "Building documentation..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+
+        for package in $PACKAGES; do
+          # Architecture-only crates can't build for the host; their docs are
+          # not part of the publish gate (per-target verify covers them).
+          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+            echo "SKIP: Package $package is architecture-only, skipping host documentation build"
+            continue
+          fi
+
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package has publish=false, skipping documentation build"
+            continue
+          fi
+
+          echo "Building documentation for $package..."
+          cargo doc --manifest-path "$CARGO_TOML_PATH" --package "$package" --no-deps --all-features \
+            --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
+            --config "source.crates-io.replace-with = 'vendored-sources'" \
+            --config "source.vendored-sources.directory = 'vendor'"
+          echo "OK: Package $package documentation built"
+        done
+        echo "OK: Documentation built successfully for all publishable packages in offline mode"
+
+branding:
+  icon: 'check-circle'
+  color: 'green'

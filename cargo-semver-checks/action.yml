@@ -1,0 +1,249 @@
+name: 'Cargo Semver Checks'
+description: 'Runs cargo-semver-checks against a baseline (by default the nearest reachable release tag) to catch API-breaking changes that the version bump does not account for.'
+author: 'Groundhog Team'
+
+inputs:
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names to check. If empty, the whole workspace is checked (cargo-semver-checks skips publish=false crates on its own).'
+    required: false
+    default: ''
+  exclude:
+    description: 'Space-separated list of package names to exclude. Only meaningful when checking the whole workspace.'
+    required: false
+    default: ''
+  baseline-rev:
+    description: 'Git revision to compare against. Takes precedence over baseline-version and over tag discovery. The revision must exist in the checkout, so the caller needs actions/checkout with fetch-depth: 0.'
+    required: false
+    default: ''
+  baseline-version:
+    description: 'Registry version (X.Y.Z) to compare against, instead of a git revision. Requires the version to be published to the registry the manifest resolves against.'
+    required: false
+    default: ''
+  tag-pattern:
+    description: 'glob(7) pattern for release tags, used to discover the baseline when neither baseline-rev nor baseline-version is set. The nearest tag reachable from HEAD is used.'
+    required: false
+    default: 'v[0-9]*.[0-9]*.[0-9]*'
+  require-baseline:
+    description: 'Fail when no baseline can be discovered. Leave false so a repo with no release tag yet (or a fresh crate) does not block CI; the run reports a notice and succeeds.'
+    required: false
+    default: 'false'
+  feature-mode:
+    description: 'Feature selection: heuristic (cargo-semver-checks default: every feature except unstable/nightly/bench/no_std and _-prefixed ones), all, default, or only-explicit. Combine with the features input to add specific features.'
+    required: false
+    default: 'heuristic'
+  features:
+    description: 'Space-separated list of extra features to enable in both baseline and current builds.'
+    required: false
+    default: ''
+  release-type:
+    description: 'Force the release type (major, minor, patch) instead of deriving it from the baseline and current version numbers. Leave empty in normal use.'
+    required: false
+    default: ''
+  target:
+    description: 'Build target to check platform-specific API against, e.g. x86_64-unknown-linux-gnu. Defaults to the host target.'
+    required: false
+    default: ''
+  registry-name:
+    description: 'Private registry name as defined in .cargo/config.toml. Used with registry-token to authenticate dependency resolution.'
+    required: false
+    default: 'groundhog'
+  registry-token:
+    description: 'Auth token for the private registry, so both the baseline and current builds can resolve registry dependencies. Omit if all deps are workspace-local or crates.io.'
+    required: false
+    default: ''
+  semver-checks-version:
+    description: 'cargo-semver-checks version to install, e.g. 0.50.0. Empty installs the latest release. Pin it so a new lint release cannot turn CI red without a repo change. The rustdoc JSON it reads comes from whichever toolchain the repo resolves to (rust-toolchain.toml or the runner default), so pin that too.'
+    required: false
+    default: ''
+
+outputs:
+  baseline:
+    description: 'The baseline that was compared against, e.g. "rev:v0.25.0" or "version:0.25.0". Empty when the check was skipped.'
+    value: ${{ steps.baseline.outputs.baseline }}
+  skipped:
+    description: 'true when no baseline could be discovered and the check did not run.'
+    value: ${{ steps.baseline.outputs.skipped }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve baseline
+      id: baseline
+      shell: bash
+      env:
+        BASELINE_REV: ${{ inputs.baseline-rev }}
+        BASELINE_VERSION: ${{ inputs.baseline-version }}
+        TAG_PATTERN: ${{ inputs.tag-pattern }}
+        REQUIRE_BASELINE: ${{ inputs.require-baseline }}
+      run: |
+        set -euo pipefail
+
+        emit() {
+          echo "baseline=$1" >> "$GITHUB_OUTPUT"
+          echo "baseline-arg=$2" >> "$GITHUB_OUTPUT"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+        }
+
+        if [ -n "$BASELINE_REV" ] && [ -n "$BASELINE_VERSION" ]; then
+          echo "::error::baseline-rev and baseline-version are mutually exclusive; set at most one"
+          exit 1
+        fi
+
+        if [ -n "$BASELINE_REV" ]; then
+          if ! git rev-parse -q --verify "${BASELINE_REV}^{commit}" >/dev/null; then
+            echo "::error::baseline-rev '$BASELINE_REV' is not present in this checkout."
+            echo "::error::Use actions/checkout with fetch-depth: 0 so history and tags are available."
+            exit 1
+          fi
+          echo "Using explicit git baseline: $BASELINE_REV"
+          emit "rev:$BASELINE_REV" "--baseline-rev $BASELINE_REV"
+          exit 0
+        fi
+
+        if [ -n "$BASELINE_VERSION" ]; then
+          echo "Using explicit registry baseline: $BASELINE_VERSION"
+          emit "version:$BASELINE_VERSION" "--baseline-version $BASELINE_VERSION"
+          exit 0
+        fi
+
+        # No explicit baseline: fall back to the nearest release tag reachable
+        # from HEAD. `git describe` (rather than a global tag sort) keeps the
+        # comparison against this branch's own release history.
+        echo "Discovering baseline tag matching '$TAG_PATTERN'..."
+        if TAG=$(git describe --tags --abbrev=0 --match "$TAG_PATTERN" 2>/dev/null) && [ -n "$TAG" ]; then
+          echo "Found baseline tag: $TAG"
+          emit "rev:$TAG" "--baseline-rev $TAG"
+          exit 0
+        fi
+
+        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          echo "::error::No tag matching '$TAG_PATTERN' was found and this checkout is shallow."
+          echo "::error::Use actions/checkout with fetch-depth: 0 so release tags are available."
+          exit 1
+        fi
+
+        if [ "$REQUIRE_BASELINE" = "true" ]; then
+          echo "::error::No tag matching '$TAG_PATTERN' is reachable from HEAD, and require-baseline is true."
+          exit 1
+        fi
+
+        echo "::notice::No tag matching '$TAG_PATTERN' is reachable from HEAD; skipping semver checks."
+        echo "baseline=" >> "$GITHUB_OUTPUT"
+        echo "baseline-arg=" >> "$GITHUB_OUTPUT"
+        echo "skipped=true" >> "$GITHUB_OUTPUT"
+
+    - name: Check for an existing cargo-semver-checks
+      id: probe
+      if: steps.baseline.outputs.skipped != 'true'
+      shell: bash
+      env:
+        WANTED_VERSION: ${{ inputs.semver-checks-version }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        # A self-hosted runner keeps ~/.cargo/bin between jobs, so reuse an
+        # already-installed binary when it is the version we want.
+        if [ -n "$WANTED_VERSION" ] && command -v cargo-semver-checks >/dev/null 2>&1; then
+          INSTALLED=$(cargo semver-checks --version 2>/dev/null | awk '{print $2}')
+          if [ "$INSTALLED" = "$WANTED_VERSION" ]; then
+            echo "OK: cargo-semver-checks $INSTALLED already installed"
+            echo "needs-install=false" >> "$GITHUB_OUTPUT"
+            echo "tool=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Installed cargo-semver-checks ($INSTALLED) differs from requested ($WANTED_VERSION)"
+        fi
+
+        if [ -n "$WANTED_VERSION" ]; then
+          echo "tool=cargo-semver-checks@$WANTED_VERSION" >> "$GITHUB_OUTPUT"
+        else
+          echo "tool=cargo-semver-checks" >> "$GITHUB_OUTPUT"
+        fi
+        echo "needs-install=true" >> "$GITHUB_OUTPUT"
+
+    - name: Install cargo-semver-checks
+      if: steps.baseline.outputs.skipped != 'true' && steps.probe.outputs.needs-install == 'true'
+      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      with:
+        tool: ${{ steps.probe.outputs.tool }}
+
+    - name: Run cargo-semver-checks
+      if: steps.baseline.outputs.skipped != 'true'
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ inputs.packages }}
+        EXCLUDE: ${{ inputs.exclude }}
+        BASELINE_ARG: ${{ steps.baseline.outputs.baseline-arg }}
+        FEATURE_MODE: ${{ inputs.feature-mode }}
+        FEATURES: ${{ inputs.features }}
+        RELEASE_TYPE: ${{ inputs.release-type }}
+        TARGET: ${{ inputs.target }}
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        # Registry auth so both the baseline and current builds can resolve
+        # private-registry dependencies.
+        if [ -n "$REGISTRY_TOKEN" ]; then
+          REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+          export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+          export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
+          echo "::add-mask::$REGISTRY_TOKEN"
+        fi
+
+        ARGS=(--manifest-path "$CARGO_TOML_PATH" --color always)
+
+        if [ -n "$PACKAGES" ]; then
+          if [ -n "$EXCLUDE" ]; then
+            echo "::warning::exclude is ignored when packages is set; list only the packages you want checked"
+          fi
+          for package in $PACKAGES; do
+            ARGS+=(--package "$package")
+          done
+        else
+          ARGS+=(--workspace)
+          for package in $EXCLUDE; do
+            ARGS+=(--exclude "$package")
+          done
+        fi
+
+        # shellcheck disable=SC2206  # BASELINE_ARG is a flag/value pair we build ourselves
+        ARGS+=($BASELINE_ARG)
+
+        case "$FEATURE_MODE" in
+          heuristic)     ;;
+          all)           ARGS+=(--all-features) ;;
+          default)       ARGS+=(--default-features) ;;
+          only-explicit) ARGS+=(--only-explicit-features) ;;
+          *)
+            echo "::error::Unknown feature-mode '$FEATURE_MODE'; expected heuristic, all, default, or only-explicit"
+            exit 1
+            ;;
+        esac
+
+        for feature in $FEATURES; do
+          ARGS+=(--features "$feature")
+        done
+
+        if [ -n "$RELEASE_TYPE" ]; then
+          ARGS+=(--release-type "$RELEASE_TYPE")
+        fi
+
+        if [ -n "$TARGET" ]; then
+          ARGS+=(--target "$TARGET")
+        fi
+
+        echo "Running: cargo semver-checks ${ARGS[*]}"
+        cargo semver-checks "${ARGS[@]}"
+
+branding:
+  icon: 'git-branch'
+  color: 'green'

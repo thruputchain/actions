@@ -1,0 +1,43 @@
+name: CI
+
+# This repository's actions and reusable workflows run inside the CI and
+# publish workflows of other repos, with registry tokens and SSH deploy keys
+# in scope, so it should meet at least the lint bar of its consumers.
+# Thus it lints itself with its own reusable workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  lint:
+    # Declared on the caller as well as in the called workflow: this is the
+    # ceiling on the token handed down, and zizmor checks the caller.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-lint.yml
+    with:
+      shellcheck-scripts: true
+
+  dry-run-registry:
+    name: Dry-run registry selection
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install test YAML parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/registry-tests-env"
+          "$RUNNER_TEMP/registry-tests-env/bin/pip" install PyYAML==6.0.3
+      - name: Test default and explicit private registries offline
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish-dry-run/test_registry.py

@@ -1,0 +1,176 @@
+name: 'Cargo Publish Prerelease'
+description: 'Publishes workspace crates to a cargo registry at their current Cargo.toml version, with no git-tag coupling. Intended for nightly/prerelease versions. Registry index is read from .cargo/config.toml in the calling repo.'
+author: 'Groundhog Team'
+
+inputs:
+  registry-name:
+    description: 'Name of the registry as defined in .cargo/config.toml'
+    required: true
+  registry-token:
+    description: 'Authentication token for the cargo registry'
+    required: true
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names to publish. If empty, all workspace packages are processed.'
+    required: false
+  publish-delay-seconds:
+    description: 'Seconds to wait after each successful publish for registry propagation'
+    required: false
+    default: '30'
+  no-verify:
+    description: 'Pass --no-verify to cargo publish (skip the publish-time verify build). Default true: builds are already verified by the cargo-publish-dry-run gate.'
+    required: false
+    default: 'true'
+
+outputs:
+  published-version:
+    description: 'Version that was published'
+    value: ${{ steps.list-packages.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: List workspace packages
+      id: list-packages
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        WORKSPACE_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+
+        if [ -n "$PACKAGES_INPUT" ]; then
+          PACKAGES="$PACKAGES_INPUT"
+          for package in $PACKAGES; do
+            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+              echo "::error::Package '$package' not found in workspace"; exit 1
+            fi
+          done
+        else
+          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        if [ -z "$PACKAGES" ]; then
+          echo "::error::No packages found to publish"; exit 1
+        fi
+
+        VERSION=$(echo "$METADATA" | jq -r '.packages[] | select(.manifest_path | endswith("Cargo.toml")) | .version' | head -1)
+
+        echo "Found packages: $PACKAGES"
+        echo "Publishing version: $VERSION"
+        echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Validate required metadata fields
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        METADATA_MISSING_FOUND=0
+        REQUIRED_FIELDS=("license" "description" "repository")
+
+        for package_name in $PACKAGES; do
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: $package_name has publish=false"; continue
+          fi
+          for field in "${REQUIRED_FIELDS[@]}"; do
+            FIELD_VALUE=$(echo "$METADATA" | jq -r --arg pkg "$package_name" --arg field "$field" \
+              '.packages[] | select(.name == $pkg) | .[$field]')
+            if [ "$FIELD_VALUE" = "null" ] || [ -z "$FIELD_VALUE" ]; then
+              echo "::error::Package '$package_name' missing required field: $field"
+              METADATA_MISSING_FOUND=1
+            fi
+          done
+        done
+
+        if [ $METADATA_MISSING_FOUND -eq 1 ]; then
+          echo "::error::Required metadata missing"; exit 1
+        fi
+        echo "OK: metadata present"
+
+    - name: Publish to registry
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        PUBLISH_DELAY_SECONDS: ${{ inputs.publish-delay-seconds }}
+        NO_VERIFY: ${{ inputs.no-verify }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]')
+        export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+        export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
+        echo "::add-mask::$REGISTRY_TOKEN"
+
+        NO_VERIFY_FLAG=""
+        if [ "${NO_VERIFY}" = "true" ]; then
+          NO_VERIFY_FLAG="--no-verify"
+          echo "Publishing with --no-verify (verified by the dry-run gate)"
+        fi
+
+        PUBLISHED_COUNT=0
+        SKIPPED_COUNT=0
+
+        for package in $PACKAGES; do
+          IS_PUBLISH_DISABLED=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
+            jq -r --arg pkg "$package" '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: $package has publish=false"; SKIPPED_COUNT=$((SKIPPED_COUNT + 1)); continue
+          fi
+
+          PACKAGE_VERSION=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
+            jq -r --arg pkg "$package" '.packages[] | select(.name == $pkg) | .version')
+          echo "Publishing $package version $PACKAGE_VERSION"
+
+          set +e
+          PUBLISH_OUTPUT=$(cargo publish \
+            --registry "$REGISTRY_NAME" \
+            --package "$package" \
+            --all-features \
+            ${NO_VERIFY_FLAG} \
+            --manifest-path "$CARGO_TOML_PATH" 2>&1)
+          PUBLISH_EXIT_CODE=$?
+          set -e
+
+          if [ $PUBLISH_EXIT_CODE -eq 0 ]; then
+            echo "OK: published $package $PACKAGE_VERSION"
+            PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+            if [ "$PUBLISH_DELAY_SECONDS" -gt 0 ]; then
+              echo "Waiting ${PUBLISH_DELAY_SECONDS}s for registry propagation..."
+              sleep "$PUBLISH_DELAY_SECONDS"
+            fi
+          else
+            if echo "$PUBLISH_OUTPUT" | grep -q "is already uploaded\|already exists"; then
+              echo "SKIP: $package $PACKAGE_VERSION already published"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            else
+              echo "::error::Failed to publish $package $PACKAGE_VERSION"
+              echo "$PUBLISH_OUTPUT"
+              exit $PUBLISH_EXIT_CODE
+            fi
+          fi
+        done
+
+        echo "=== Published: $PUBLISHED_COUNT, Skipped: $SKIPPED_COUNT ==="
+
+branding:
+  icon: 'package'
+  color: 'orange'

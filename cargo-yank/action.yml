@@ -1,0 +1,185 @@
+name: 'Cargo Yank'
+description: 'Yanks (or un-yanks) a published version of workspace crates from a cargo registry. Registry configuration is read from .cargo/config.toml in the calling repository.'
+author: 'Groundhog Team'
+
+inputs:
+  version:
+    description: 'Version to yank in 1.2.3 format (bare semver, no prefix)'
+    required: true
+  undo:
+    description: 'Pass --undo to cargo yank, restoring a previously yanked version'
+    required: false
+    default: 'false'
+  registry-name:
+    description: 'Name of the registry as defined in .cargo/config.toml'
+    required: true
+  registry-token:
+    description: 'Authentication token for the cargo registry'
+    required: true
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names to yank. If not provided, all workspace packages will be processed.'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate version format
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        echo "Validating version format..."
+        bash "$ACTION_PATH/validate-version.sh" "$VERSION"
+
+    - name: Verify Cargo.toml exists
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+      run: |
+        set -euo pipefail
+        echo "Checking Cargo.toml exists at: $CARGO_TOML_PATH"
+
+        if [ ! -f "$CARGO_TOML_PATH" ]; then
+          echo "::error::Cargo.toml not found at path: $CARGO_TOML_PATH"
+          echo "::error::Please verify the file exists or set cargo-toml-path input"
+          exit 1
+        fi
+
+        echo "OK: Cargo.toml found"
+
+    - name: List workspace packages
+      id: list-packages
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        WORKSPACE_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+
+        if [ -n "$PACKAGES_INPUT" ]; then
+          echo "Using provided packages list: $PACKAGES_INPUT"
+          PACKAGES="$PACKAGES_INPUT"
+
+          VALIDATION_FAILED=0
+          for package in $PACKAGES; do
+            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+              echo "::error::Package '$package' not found in workspace"
+              VALIDATION_FAILED=1
+            fi
+          done
+
+          if [ $VALIDATION_FAILED -eq 1 ]; then
+            echo "::error::One or more provided packages are invalid"
+            exit 1
+          fi
+        else
+          echo "Discovering workspace packages..."
+          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        if [ -z "$PACKAGES" ]; then
+          echo "::error::No packages found to yank"
+          echo "::error::Ensure Cargo.toml is valid and contains at least one package"
+          exit 1
+        fi
+
+        echo "Found packages: $PACKAGES"
+        echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+
+    - name: Yank from registry
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        UNDO: ${{ inputs.undo }}
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        # Set registry token via environment variable
+        # The registry index is configured in .cargo/config.toml
+        REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]')
+        export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+        export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
+
+        # Explicitly mask the token in logs (GitHub Actions also auto-masks secrets, but this is extra safety)
+        echo "::add-mask::$REGISTRY_TOKEN"
+
+        UNDO_FLAG=""
+        OPERATION="yank"
+        OPERATION_TITLE="Yank"
+        if [ "$UNDO" = "true" ]; then
+          UNDO_FLAG="--undo"
+          OPERATION="un-yank"
+          OPERATION_TITLE="Un-yank"
+        fi
+
+        echo "=== Cargo $OPERATION_TITLE version $VERSION from registry: $REGISTRY_NAME ==="
+        echo ""
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+
+        YANKED_COUNT=0
+        SKIPPED_COUNT=0
+
+        for package in $PACKAGES; do
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package has publish=false, skipping $OPERATION"
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            continue
+          fi
+
+          echo "Running $OPERATION for $package version $VERSION..."
+
+          # Don't fail outright: a package may never have had this version
+          # published (e.g. crates added to the workspace later).
+          set +e
+          YANK_OUTPUT=$(cargo yank \
+            --version "$VERSION" \
+            --registry "$REGISTRY_NAME" \
+            ${UNDO_FLAG} \
+            "$package" 2>&1)
+          YANK_EXIT_CODE=$?
+          set -e
+
+          if [ $YANK_EXIT_CODE -eq 0 ]; then
+            echo "OK: $OPERATION_TITLE succeeded for $package version $VERSION"
+            YANKED_COUNT=$((YANKED_COUNT + 1))
+          else
+            if echo "$YANK_OUTPUT" | grep -qi "does not exist\|not found\|could not find\|has not been published"; then
+              echo "SKIP: $package version $VERSION not found in registry"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            else
+              echo "::error::Failed to $OPERATION $package version $VERSION"
+              echo "$YANK_OUTPUT"
+              exit $YANK_EXIT_CODE
+            fi
+          fi
+        done
+
+        echo ""
+        echo "=== $OPERATION_TITLE Summary ==="
+        echo "Succeeded: $YANKED_COUNT package(s)"
+        echo "Skipped: $SKIPPED_COUNT package(s)"
+        echo "=== $OPERATION_TITLE Complete ==="
+
+branding:
+  icon: 'trash-2'
+  color: 'orange'

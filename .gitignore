@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# Test artifacts
+test-output/
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp

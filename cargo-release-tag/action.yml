@@ -1,0 +1,253 @@
+name: 'Cargo Release Tag'
+description: 'Tags HEAD with the crate version, pushes the tag, and decides whether this commit is the release commit for that version — refusing to proceed when the remote tag and the registry disagree.'
+author: 'Groundhog Team'
+
+inputs:
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names that must share one version (the first is the reference). If not provided, all workspace packages are checked.'
+    required: false
+  tag-prefix:
+    description: 'Prefix for the git tag (default: "v")'
+    required: false
+    default: 'v'
+  github-token:
+    description: 'Token used to push the tag to the repository.'
+    required: true
+  on-existing-tag:
+    description: >-
+      What to do when the remote tag already exists at a different commit.
+      "fail" (default): error out — the caller expects every run to be a new
+      release or a re-run of the tagged commit. "skip-if-published": consult
+      the registry; if the version is already published set released=false
+      (an unchanged crate), and fail only when it is not published — that is
+      a half-completed release, and publishing HEAD would ship content that
+      does not match the tag.
+    required: false
+    default: 'fail'
+  registry-name:
+    description: 'Registry name as defined in .cargo/config.toml. Required for on-existing-tag: skip-if-published.'
+    required: false
+    default: ''
+  registry-token:
+    description: 'Registry auth token, sent verbatim in the Authorization header for the index probe (exactly as cargo sends it). Required for on-existing-tag: skip-if-published.'
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: 'The version extracted from Cargo.toml'
+    value: ${{ steps.extract-version.outputs.version }}
+  tag:
+    description: 'The full git tag name'
+    value: ${{ steps.release.outputs.tag }}
+  released:
+    description: >-
+      "true" iff this commit is the release commit for the version (the tag
+      was newly pushed, or already points at this commit). "false" only under
+      on-existing-tag: skip-if-published, when the version is already
+      published and tagged on another commit.
+    value: ${{ steps.release.outputs.released }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract and validate version
+      id: extract-version
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Extracting version from $CARGO_TOML_PATH..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+
+        if [ -n "$PACKAGES_INPUT" ]; then
+          # Use the first specified package's version as the reference
+          FIRST_PACKAGE=$(echo "$PACKAGES_INPUT" | awk '{print $1}')
+          ROOT_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$FIRST_PACKAGE" \
+            '.packages[] | select(.name == $pkg) | .version')
+        else
+          ROOT_VERSION=$(echo "$METADATA" | jq -r '.packages[] | select(.manifest_path | endswith("Cargo.toml")) | .version' | head -1)
+        fi
+
+        if [ -z "$ROOT_VERSION" ]; then
+          echo "::error::Could not extract version from $CARGO_TOML_PATH"
+          exit 1
+        fi
+
+        echo "Reference version: $ROOT_VERSION"
+
+        if [ -n "$PACKAGES_INPUT" ]; then
+          echo "Validating specified packages: $PACKAGES_INPUT"
+          PACKAGES_TO_CHECK="$PACKAGES_INPUT"
+
+          ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+          for package in $PACKAGES_TO_CHECK; do
+            if ! echo "$ALL_PACKAGES" | grep -q "^${package}$"; then
+              echo "::error::Package '$package' not found in workspace"
+              exit 1
+            fi
+          done
+        else
+          echo "Validating all workspace crate versions..."
+          PACKAGES_TO_CHECK=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        MISMATCHED=false
+        for package_name in $PACKAGES_TO_CHECK; do
+          PACKAGE_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | .version')
+
+          if [ "$PACKAGE_VERSION" != "$ROOT_VERSION" ]; then
+            echo "::error::Package '$package_name' has version $PACKAGE_VERSION, expected $ROOT_VERSION"
+            MISMATCHED=true
+          else
+            echo "OK: Package '$package_name' version matches: $PACKAGE_VERSION"
+          fi
+        done
+
+        if [ "$MISMATCHED" = true ]; then
+          echo "::error::Not all checked crates have the same version!"
+          exit 1
+        fi
+
+        echo "OK: All checked crates have version $ROOT_VERSION"
+        echo "version=$ROOT_VERSION" >> "$GITHUB_OUTPUT"
+        echo "packages=$PACKAGES_TO_CHECK" >> "$GITHUB_OUTPUT"
+
+    - name: Tag, push, and decide
+      id: release
+      shell: bash
+      env:
+        VERSION: ${{ steps.extract-version.outputs.version }}
+        PACKAGES: ${{ steps.extract-version.outputs.packages }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        MODE: ${{ inputs.on-existing-tag }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+      run: |
+        set -euo pipefail
+
+        TAG="${TAG_PREFIX}${VERSION}"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+        # HEAD is always the release candidate: the durable record of what a
+        # version was built from is the REMOTE tag, checked below.
+        git tag -f "$TAG"
+
+        # Address the remote by URL rather than repointing `origin` at it.
+        # Callers set `url."git@github.com:".insteadOf "https://github.com/"`
+        # so cargo can reach private git deps, and `git remote get-url`
+        # returns the REWRITTEN url -- saving and restoring `origin` around
+        # the push therefore leaves it a bare SSH url that only the actions
+        # deploy key can use, in place of the credentialed HTTPS remote the
+        # checkout persisted, breaking later steps in the job. A url carrying
+        # userinfo is not matched by that insteadOf rule, so this one reaches
+        # GitHub over HTTPS whatever the caller configured.
+        REMOTE_URL="https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+        # Pushing a tag that already exists at the same commit is a no-op
+        # success, so a re-run of a release commit sails through here.
+        if git push "$REMOTE_URL" "$TAG"; then
+          echo "OK: tag $TAG is on this commit and pushed"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # For an annotated tag the plain ref holds the tag OBJECT's SHA; the
+        # peeled `^{}` entry holds the commit it targets, which is what HEAD
+        # must be compared against. Lightweight tags have no peeled entry.
+        LS=$(git ls-remote --tags "$REMOTE_URL" "refs/tags/$TAG" "refs/tags/$TAG^{}")
+        PEELED_SHA=$(grep '\^{}$' <<<"$LS" | cut -f1 | head -1 || true)
+        DIRECT_SHA=$(grep -v '\^{}$' <<<"$LS" | cut -f1 | head -1 || true)
+        REMOTE_SHA="${PEELED_SHA:-$DIRECT_SHA}"
+        if [ -z "$REMOTE_SHA" ]; then
+          echo "::error::Pushing tag $TAG failed and it does not exist on the remote"
+          exit 1
+        fi
+
+        HEAD_SHA=$(git rev-parse HEAD)
+        if [ "$REMOTE_SHA" = "$HEAD_SHA" ]; then
+          # The push failed for some other reason (e.g. permissions), but the
+          # remote tag already marks this commit as the release commit.
+          echo "OK: tag $TAG already points at this commit"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$MODE" != "skip-if-published" ]; then
+          echo "::error::Tag $TAG already exists at $REMOTE_SHA, which is not this commit ($HEAD_SHA)."
+          echo "::error::Bump the version, or re-run from the tagged commit."
+          exit 1
+        fi
+
+        if [ -z "$REGISTRY_NAME" ] || [ -z "$REGISTRY_TOKEN" ]; then
+          echo "::error::on-existing-tag: skip-if-published requires registry-name and registry-token"
+          exit 1
+        fi
+
+        # The tag belongs to another commit. That is fine iff the version is
+        # already published (the crate simply wasn't bumped for this
+        # release); if it is NOT published, a previous run died between tag
+        # push and publish (or a stray tag was pushed by hand), and
+        # publishing HEAD would ship content that does not match the tag.
+        # The probe fails closed: an unreachable registry stops the release
+        # rather than guessing.
+        INDEX_URL=$(sed -n "s/^${REGISTRY_NAME} *= *{ *index *= *\"sparse+\([^\"]*\)\".*/\1/p" .cargo/config.toml | head -1)
+        if [ -z "$INDEX_URL" ]; then
+          echo "::error::Could not find a sparse index for registry '$REGISTRY_NAME' in .cargo/config.toml"
+          exit 1
+        fi
+        INDEX_URL="${INDEX_URL%/}/"
+
+        index_path() {
+          local name
+          name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+          case ${#name} in
+            1) echo "1/$name" ;;
+            2) echo "2/$name" ;;
+            3) echo "3/${name:0:1}/$name" ;;
+            *) echo "${name:0:2}/${name:2:2}/$name" ;;
+          esac
+        }
+
+        ENTRY_FILE=$(mktemp)
+        for pkg in $PACKAGES; do
+          # 404/410/451 mean the crate has no published versions at all (per
+          # the registry index protocol) — that still lands in the
+          # unpublished-version diagnostic below, not a raw HTTP error. Any
+          # other failure is a real probe problem and fails closed.
+          HTTP_CODE=$(curl -sS -o "$ENTRY_FILE" -w '%{http_code}' \
+            -H "Authorization: ${REGISTRY_TOKEN}" \
+            "${INDEX_URL}$(index_path "$pkg")")
+          case "$HTTP_CODE" in
+            200) PUBLISHED=$(jq -r '.vers' "$ENTRY_FILE") ;;
+            404|410|451) PUBLISHED="" ;;
+            *)
+              echo "::error::Registry probe for '$pkg' failed (HTTP $HTTP_CODE); cannot tell whether ${pkg}@${VERSION} is published"
+              exit 1
+              ;;
+          esac
+          if ! grep -qx "$VERSION" <<<"$PUBLISHED"; then
+            echo "::error::Tag $TAG points at $REMOTE_SHA (not this commit) but ${pkg}@${VERSION} is not in the registry."
+            echo "::error::A previous release likely died between tag push and publish. Re-run from the tagged commit, or delete the stale tag; publishing from this commit would ship content that does not match the tag."
+            exit 1
+          fi
+          echo "OK: ${pkg}@${VERSION} is already published"
+        done
+
+        echo "::notice::Tag $TAG already exists at $REMOTE_SHA and version $VERSION is published; this commit does not release it"
+        echo "released=false" >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'tag'
+  color: 'blue'

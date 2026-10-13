@@ -1,0 +1,500 @@
+name: 'Cargo Publish'
+description: 'Publishes Rust crates to a cargo registry with strict version validation. Registry configuration is read from .cargo/config.toml in the calling repository.'
+author: 'Groundhog Team'
+
+inputs:
+  git-tag:
+    description: 'Git tag in v1.2.3 format (or custom prefix format if tag-prefix is set)'
+    required: true
+  tag-prefix:
+    description: 'Prefix for git tags (e.g., "v" for v1.2.3, or "" for 1.2.3)'
+    required: false
+    default: 'v'
+  registry-name:
+    description: 'Name of the registry as defined in .cargo/config.toml'
+    required: true
+  registry-token:
+    description: 'Authentication token for the cargo registry'
+    required: true
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file'
+    required: false
+    default: './Cargo.toml'
+  packages:
+    description: 'Space-separated list of package names to publish. If not provided, all workspace packages will be processed.'
+    required: false
+  publish-delay-seconds:
+    description: 'Number of seconds to wait after publishing each package to allow registry to propagate'
+    required: false
+    default: '30'
+  no-verify:
+    description: 'Pass --no-verify to cargo publish (skip the publish-time verify build). Use when verification is already done by a prior dry-run job; required for architecture-only crates that cannot build on the host.'
+    required: false
+    default: 'false'
+  arch-only-packages:
+    description: 'Space-separated list of packages that can only build for a non-host target (e.g. wasm32/riscv32 runtimes). They are skipped in the host documentation validation; their builds are covered by the dry-run job''s per-target verify.'
+    required: false
+
+outputs:
+  published-version:
+    description: 'Version that was published'
+    value: ${{ steps.extract-version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate git tag format
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GIT_TAG: ${{ inputs.git-tag }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+      run: |
+        set -euo pipefail
+        echo "Validating git tag format..."
+        bash "$ACTION_PATH/validate-tag.sh" "$GIT_TAG" "$TAG_PREFIX"
+
+    - name: Verify current commit is tagged
+      shell: bash
+      env:
+        GIT_TAG: ${{ inputs.git-tag }}
+      run: |
+        set -euo pipefail
+        echo "Verifying current commit is tagged with '$GIT_TAG'..."
+
+        if ! git rev-parse "$GIT_TAG" >/dev/null 2>&1; then
+          echo "::error::Git tag '$GIT_TAG' does not exist in this repository"
+          echo "::error::Please ensure the tag exists and is pushed to the remote"
+          exit 1
+        fi
+
+        TAG_COMMIT=$(git rev-parse "$GIT_TAG^{commit}")
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+
+        if [ "$TAG_COMMIT" != "$CURRENT_COMMIT" ]; then
+          echo "::error::Current commit is not tagged with '$GIT_TAG'"
+          echo "::error::  Tag '$GIT_TAG' points to: $TAG_COMMIT"
+          echo "::error::  Current commit (HEAD):    $CURRENT_COMMIT"
+          echo "::error::"
+          echo "::error::Please checkout the commit that is tagged with '$GIT_TAG'"
+          exit 1
+        fi
+
+        echo "OK: Current commit is tagged with '$GIT_TAG'"
+
+    - name: Extract version from tag
+      id: extract-version
+      shell: bash
+      env:
+        GIT_TAG: ${{ inputs.git-tag }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+      run: |
+        set -euo pipefail
+        echo "Extracting version from tag..."
+        if [ -z "$TAG_PREFIX" ]; then
+          TAG_VERSION="$GIT_TAG"
+        else
+          TAG_VERSION="${GIT_TAG#$TAG_PREFIX}"
+        fi
+        echo "OK: Extracted version: $TAG_VERSION"
+        echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Verify Cargo.toml exists
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+      run: |
+        set -euo pipefail
+        echo "Checking Cargo.toml exists at: $CARGO_TOML_PATH"
+
+        if [ ! -f "$CARGO_TOML_PATH" ]; then
+          echo "::error::Cargo.toml not found at path: $CARGO_TOML_PATH"
+          echo "::error::Please verify the file exists or set cargo-toml-path input"
+          exit 1
+        fi
+
+        echo "OK: Cargo.toml found"
+
+    - name: List workspace packages
+      id: list-packages
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES_INPUT: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+        
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        WORKSPACE_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
+        
+        if [ -n "$PACKAGES_INPUT" ]; then
+          echo "Using provided packages list: $PACKAGES_INPUT"
+          PACKAGES="$PACKAGES_INPUT"
+          
+          # Validate that all provided packages exist and are publishable
+          VALIDATION_FAILED=0
+          for package in $PACKAGES; do
+            # Check if package exists in workspace
+            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+              echo "::error::Package '$package' not found in workspace"
+              VALIDATION_FAILED=1
+              continue
+            fi
+            
+            # Check if package has publish=false (appears as empty array [] in cargo metadata)
+            IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+              '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+            
+            if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+              echo "::error::Package '$package' has publish=false in Cargo.toml and cannot be published"
+              VALIDATION_FAILED=1
+            fi
+          done
+          
+          if [ $VALIDATION_FAILED -eq 1 ]; then
+            echo "::error::One or more provided packages are invalid or have publish disabled"
+            exit 1
+          fi
+        else
+          echo "Discovering workspace packages..."
+          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+        fi
+
+        if [ -z "$PACKAGES" ]; then
+          echo "::error::No packages found to publish"
+          echo "::error::Ensure Cargo.toml is valid and contains at least one package"
+          exit 1
+        fi
+
+        echo "Found packages: $PACKAGES"
+        echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+
+    - name: Validate package versions match tag
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        TAG_VERSION: ${{ steps.extract-version.outputs.version }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Validating packages match git tag version: $TAG_VERSION"
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        MISMATCH_FOUND=0
+        MISMATCHED_PACKAGES=""
+
+        for package_name in $PACKAGES; do
+          version=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | .version')
+          
+          if [ "$version" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION MISMATCH in package '$package_name'!"
+            echo "::error::  Git tag version: $TAG_VERSION"
+            echo "::error::  Package version: $version"
+            MISMATCH_FOUND=1
+            MISMATCHED_PACKAGES="${MISMATCHED_PACKAGES}  - $package_name: $version (expected: $TAG_VERSION)\n"
+          else
+            echo "OK: Package '$package_name' version matches: $version"
+          fi
+        done
+
+        if [ $MISMATCH_FOUND -eq 1 ]; then
+          echo "::error::VERSION MISMATCH DETECTED!"
+          echo "::error::"
+          echo "::error::The following packages have versions that don't match the git tag:"
+          echo -e "::error::$MISMATCHED_PACKAGES"
+          echo "::error::"
+          echo "::error::All packages must have version $TAG_VERSION"
+          echo "::error::Please update the version field in each package's Cargo.toml"
+          exit 1
+        fi
+
+        echo "OK: All package versions match!"
+
+    - name: Validate workspace dependency versions
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        TAG_VERSION: ${{ steps.extract-version.outputs.version }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Validating workspace internal dependencies..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        WORKSPACE_PACKAGES=$(echo "$METADATA" | jq -r '.packages[].name')
+
+        DEPENDENCY_MISMATCH_FOUND=0
+        MISMATCHED_DEPS=""
+        PACKAGES_NEWLINE=$(echo "$PACKAGES" | tr ' ' '\n')
+
+        for package_name in $PACKAGES; do
+          DEPENDENCIES=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | .dependencies[] | "\(.name):\(.req)"')
+
+          if [ -n "$DEPENDENCIES" ]; then
+            while IFS=':' read -r dep_name dep_req; do
+              if echo "$PACKAGES_NEWLINE" | grep -q "^${dep_name}$"; then
+                if [[ "$dep_req" =~ ^[\^=~]?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                  REQ_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+
+                  if [ "$REQ_VERSION" != "$TAG_VERSION" ]; then
+                    echo "::error::DEPENDENCY VERSION MISMATCH in package '$package_name'!"
+                    echo "::error::  Depends on workspace package: $dep_name"
+                    echo "::error::  Required version: $dep_req (resolves to $REQ_VERSION)"
+                    echo "::error::  Expected version: $TAG_VERSION"
+                    DEPENDENCY_MISMATCH_FOUND=1
+                    MISMATCHED_DEPS="${MISMATCHED_DEPS}  - $package_name -> $dep_name: $dep_req (expected: $TAG_VERSION)\n"
+                  else
+                    echo "OK: Package '$package_name' depends on '$dep_name' with correct version: $dep_req"
+                  fi
+                elif [[ "$dep_req" == "*" ]]; then
+                  echo "OK: Package '$package_name' depends on '$dep_name' with wildcard: $dep_req"
+                else
+                  echo "OK: Package '$package_name' depends on '$dep_name' with requirement: $dep_req"
+                fi
+              fi
+            done <<< "$DEPENDENCIES"
+          fi
+        done
+
+        if [ $DEPENDENCY_MISMATCH_FOUND -eq 1 ]; then
+          echo "::error::WORKSPACE DEPENDENCY VERSION MISMATCH DETECTED!"
+          echo "::error::"
+          echo "::error::The following packages depend on workspace packages with incorrect versions:"
+          echo -e "::error::$MISMATCHED_DEPS"
+          echo "::error::"
+          echo "::error::All workspace internal dependencies must reference version $TAG_VERSION"
+          echo "::error::Please update the version in the dependency specification in Cargo.toml"
+          echo "::error::Or use { path = \"../crate-name\" } for workspace dependencies"
+          exit 1
+        fi
+
+        echo "OK: All workspace internal dependencies use correct versions!"
+
+    - name: Validate required metadata fields
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Validating required metadata fields..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        METADATA_MISSING_FOUND=0
+        MISSING_METADATA=""
+
+        REQUIRED_FIELDS=("license" "description" "repository")
+
+        for package_name in $PACKAGES; do
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package_name has publish=false, skipping metadata validation"
+            continue
+          fi
+
+          echo "Checking package: $package_name"
+
+          for field in "${REQUIRED_FIELDS[@]}"; do
+            FIELD_VALUE=$(echo "$METADATA" | jq -r --arg pkg "$package_name" --arg field "$field" \
+              '.packages[] | select(.name == $pkg) | .[$field]')
+
+            if [ "$FIELD_VALUE" = "null" ] || [ -z "$FIELD_VALUE" ]; then
+              echo "::error::MISSING METADATA in package '$package_name'!"
+              echo "::error::  Missing required field: $field"
+              METADATA_MISSING_FOUND=1
+              MISSING_METADATA="${MISSING_METADATA}  - $package_name: missing '$field'\n"
+            else
+              echo "  OK: $field = $FIELD_VALUE"
+            fi
+          done
+        done
+
+        if [ $METADATA_MISSING_FOUND -eq 1 ]; then
+          echo "::error::REQUIRED METADATA MISSING!"
+          echo "::error::"
+          echo "::error::The following packages are missing required metadata fields:"
+          echo -e "::error::$MISSING_METADATA"
+          echo "::error::"
+          echo "::error::Please add the following fields to each package's Cargo.toml:"
+          echo "::error::  license = \"MIT\" (or \"Apache-2.0\" or \"MIT OR Apache-2.0\")"
+          echo "::error::  description = \"A short description of the package\""
+          echo "::error::  repository = \"https://github.com/your-org/your-repo\""
+          exit 1
+        fi
+
+        echo "OK: All publishable packages have required metadata!"
+
+    # Redundant with cargo-publish-dry-run
+    - name: Validate documentation builds
+      shell: bash
+      env:
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
+      run: |
+        set -euo pipefail
+        source "$HOME/.cargo/env"
+
+        echo "Validating documentation builds..."
+
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
+        DOC_BUILD_FAILED=0
+
+        for package in $PACKAGES; do
+          # Architecture-only crates can't build for the host (their deps are
+          # target-gated); the dry-run job's per-target verify covers them.
+          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+            echo "SKIP: Package $package is architecture-only, skipping host documentation build"
+            continue
+          fi
+
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package has publish=false, skipping documentation build"
+            continue
+          fi
+
+          echo "Building documentation for $package..."
+          if ! cargo doc --manifest-path "$CARGO_TOML_PATH" --package "$package" --no-deps --all-features 2>&1; then
+            echo "::error::DOCUMENTATION BUILD FAILED for package '$package'!"
+            DOC_BUILD_FAILED=1
+          else
+            echo "OK: Documentation built successfully for $package"
+          fi
+        done
+
+        if [ $DOC_BUILD_FAILED -eq 1 ]; then
+          echo "::error::DOCUMENTATION BUILD FAILED!"
+          echo "::error::"
+          echo "::error::The documentation failed to build for one or more packages."
+          echo "::error::Please fix any documentation errors and ensure 'cargo doc' succeeds."
+          exit 1
+        fi
+
+        echo "OK: Documentation builds successfully for all publishable packages!"
+
+    - name: Publish to registry
+      shell: bash
+      env:
+        REGISTRY_NAME: ${{ inputs.registry-name }}
+        REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
+        PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        PUBLISH_DELAY_SECONDS: ${{ inputs.publish-delay-seconds }}
+        NO_VERIFY: ${{ inputs.no-verify }}
+      run: |
+        set -euo pipefail
+
+        echo "REGISTRY_NAME: $REGISTRY_NAME"
+        echo "CARGO_TOML_PATH: $CARGO_TOML_PATH"
+        echo "PUBLISH_DELAY_SECONDS: $PUBLISH_DELAY_SECONDS"
+
+        # Source the cargo environment variables
+        source "$HOME/.cargo/env"
+
+        echo "=== Cargo Publish to Registry ==="
+        echo ""
+
+        # Set registry token via environment variable
+        # The registry index is configured in .cargo/config.toml
+        REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]')
+        echo "REGISTRY_NAME_UPPER: $REGISTRY_NAME_UPPER"
+        export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+        export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
+        echo "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN"
+
+        # Explicitly mask the token in logs (GitHub Actions also auto-masks secrets, but this is extra safety)
+        echo "::add-mask::$REGISTRY_TOKEN"
+
+        echo "Publishing crates to registry: $REGISTRY_NAME"
+        echo "Registry configuration is read from .cargo/config.toml"
+        echo ""
+
+        PUBLISHED_COUNT=0
+        SKIPPED_COUNT=0
+
+        # Opt-in --no-verify: build verification is done by the dry-run job, and
+        # a host verify-build here would fail for architecture-only crates
+        # (e.g. the wasm/rv32 runtimes).
+        NO_VERIFY_FLAG=""
+        if [ "${NO_VERIFY}" = "true" ]; then
+          NO_VERIFY_FLAG="--no-verify"
+          echo "Publishing with --no-verify (verification performed in the dry-run job)"
+        fi
+
+        # Publish each package individually, skipping those with publish=false or already published
+        for package in $PACKAGES; do
+          # Check if package has publish=false (appears as empty array [] in cargo metadata)
+          IS_PUBLISH_DISABLED=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
+            jq -r '.packages[] | select(.name=="'$package'") | if .publish == [] then "true" else "false" end')
+
+          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
+            echo "SKIP: Package $package has publish=false, skipping publish"
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            continue
+          fi
+
+          # Get package version for logging
+          PACKAGE_VERSION=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
+            jq -r '.packages[] | select(.name=="'$package'") | .version')
+
+          echo "Publishing package: $package version $PACKAGE_VERSION"
+
+          # Try to publish, but don't fail if already published.
+          set +e
+          PUBLISH_OUTPUT=$(cargo publish \
+            --registry "$REGISTRY_NAME" \
+            --package "$package" \
+            --all-features \
+            ${NO_VERIFY_FLAG} \
+            --manifest-path "$CARGO_TOML_PATH" 2>&1)
+          PUBLISH_EXIT_CODE=$?
+          set -e
+
+          if [ $PUBLISH_EXIT_CODE -eq 0 ]; then
+            echo "OK: Successfully published $package version $PACKAGE_VERSION"
+            PUBLISHED_COUNT=$((PUBLISHED_COUNT + 1))
+
+            # Wait after successful publish to allow registry to propagate
+            if [ "$PUBLISH_DELAY_SECONDS" -gt 0 ]; then
+              echo "Waiting ${PUBLISH_DELAY_SECONDS} seconds for registry to propagate..."
+              sleep "$PUBLISH_DELAY_SECONDS"
+            fi
+          else
+            # Check if the error is due to version already being uploaded
+            if echo "$PUBLISH_OUTPUT" | grep -q "is already uploaded\|already exists"; then
+              echo "SKIP: Package $package version $PACKAGE_VERSION is already published"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            else
+              # This is a real error, fail the workflow
+              echo "::error::Failed to publish $package version $PACKAGE_VERSION"
+              echo "$PUBLISH_OUTPUT"
+              exit $PUBLISH_EXIT_CODE
+            fi
+          fi
+        done
+
+        echo ""
+        echo "=== Publish Summary ==="
+        echo "Published: $PUBLISHED_COUNT package(s)"
+        echo "Skipped: $SKIPPED_COUNT package(s)"
+        echo "=== Publish Complete ==="
+
+branding:
+  icon: 'package'
+  color: 'orange'

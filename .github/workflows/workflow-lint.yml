@@ -1,0 +1,278 @@
+name: Workflow lint
+
+# Reusable: called as
+#   jobs:
+#     workflow-lint:
+#       uses: thruputchain/actions/.github/workflows/workflow-lint.yml@<ref>
+#
+# REQUIRES A LINUX x86-64 RUNNER (The installer fetches Linux x86-64 release
+# binaries.)
+#
+# Per-repo exemptions can be placed in in the caller's `.github/zizmor.yml` and
+# `.github/actionlint.yaml`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label. Must be Linux x86-64."
+        type: string
+        required: false
+        default: ubuntu-latest
+      pedantic:
+        description: >-
+          Also run a non-blocking --persona=pedantic pass. Adds
+          process-hygiene audits plus stale-action-refs: useful signal, not
+          PR-blocking material.
+        type: boolean
+        required: false
+        default: true
+      run-zizmor:
+        description: >-
+          Run zizmor. Off for any repo that references a *private*
+          repository cross-repo (uses: org/repo/...): zizmor's
+          impostor-commit and ref-confusion audits read that repository's
+          refs over the git protocol, and a consumer's github.token cannot,
+          so the run aborts with 403 rather than reporting findings.
+        type: boolean
+        required: false
+        default: true
+      shellcheck-scripts:
+        description: >-
+          Also shellcheck tracked *.sh files. Off by default: actionlint
+          already covers `run:` blocks, and some repos have pre-existing
+          findings in standalone scripts.
+        type: boolean
+        required: false
+        default: false
+      actionlint-version:
+        type: string
+        required: false
+        default: "1.7.12"
+      actionlint-sha256:
+        description: "From the release's published actionlint_<v>_checksums.txt."
+        type: string
+        required: false
+        default: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+      zizmor-version:
+        type: string
+        required: false
+        default: "1.30.1"
+      zizmor-sha256:
+        description: >-
+          zizmor publishes no checksum file, so this is trust-on-first-use:
+          it pins against later tampering with the asset, not provenance.
+        type: string
+        required: false
+        default: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
+    secrets:
+      lint-token:
+        # See `run-zizmor` above for purpose
+        description: >-
+          Optional token for zizmor's online audits, used instead of
+          github.token.
+        required: false
+
+jobs:
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install linters
+        env:
+          ACTIONLINT_VERSION: ${{ inputs.actionlint-version }}
+          ACTIONLINT_SHA256: ${{ inputs.actionlint-sha256 }}
+          ZIZMOR_VERSION: ${{ inputs.zizmor-version }}
+          ZIZMOR_SHA256: ${{ inputs.zizmor-sha256 }}
+        run: |
+          set -euo pipefail
+
+          os="$(uname -s)"
+          arch="$(uname -m)"
+          case "$os/$arch" in
+            Linux/x86_64 | Linux/amd64) ;;
+            *)
+              echo "::error::workflow-lint requires a Linux x86-64 runner; this one is $os/$arch."
+              echo "::error::Pass runs-on: ubuntu-latest or another Linux x86-64 label."
+              exit 1
+              ;;
+          esac
+
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+
+          # Probe for the pyflakes *module*, not a console script: Ubuntu's
+          # python3-pyflakes installs no pyflakes/pyflakes3 executable, so a
+          # `command -v` probe reinstalls a present package and then fails.
+          have_pyflakes() { python3 -c 'import pyflakes' >/dev/null 2>&1; }
+
+          # Check each backend independently: runner images commonly ship one
+          # but not the other, and a combined guard would skip the install.
+          missing=()
+          command -v shellcheck >/dev/null 2>&1 || missing+=(shellcheck)
+          have_pyflakes || missing+=(python3-pyflakes)
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "installing: ${missing[*]}"
+            # apt and sudo are needed only when a backend is absent.
+            if ! command -v apt-get >/dev/null 2>&1; then
+              echo "::error::need to install ${missing[*]}, but apt-get is unavailable."
+              echo "::error::Use a Debian/Ubuntu runner, or preinstall shellcheck and python3-pyflakes."
+              exit 1
+            fi
+            sudo_cmd=""
+            if [ "$(id -u)" -ne 0 ]; then
+              command -v sudo >/dev/null 2>&1 \
+                || { echo "::error::need sudo to install ${missing[*]}"; exit 1; }
+              sudo_cmd="sudo"
+            fi
+            # A broken third-party list must not fail the whole update; the
+            # checks below are the real guard.
+            $sudo_cmd apt-get update || true
+            $sudo_cmd apt-get install -y "${missing[@]}"
+          fi
+
+          command -v shellcheck >/dev/null 2>&1 \
+            || { echo "::error::shellcheck unavailable after install"; exit 1; }
+          have_pyflakes \
+            || { echo "::error::pyflakes module unavailable after install"; exit 1; }
+
+          # actionlint's -pyflakes takes an executable; supply one when the
+          # distro ships only the module.
+          if ! command -v pyflakes >/dev/null 2>&1; then
+            printf '#!/bin/sh\nexec python3 -m pyflakes "$@"\n' > "$bin/pyflakes"
+            chmod +x "$bin/pyflakes"
+          fi
+
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/actionlint.tar.gz" -C "$tmp" actionlint
+
+          curl -fsSL -o "$tmp/zizmor.tar.gz" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  $tmp/zizmor.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/zizmor.tar.gz" -C "$tmp" zizmor
+
+          install -m755 "$tmp/actionlint" "$tmp/zizmor" "$bin/"
+          echo "$bin" >> "$GITHUB_PATH"
+          shellcheck --version | head -2
+          python3 -m pyflakes --version
+          "$bin/actionlint" --version
+          "$bin/zizmor" --version
+
+      - name: Lint
+        env:
+          # Falls back to github.token, which suffices unless a private
+          # repository is referenced cross-repo. See the lint-token secret.
+          GH_TOKEN: ${{ secrets.lint-token || github.token }}
+          ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
+          RUN_ZIZMOR: ${{ inputs.run-zizmor }}
+          SHELLCHECK_SCRIPTS: ${{ inputs.shellcheck-scripts }}
+        run: |
+          set -euo pipefail
+
+          # pyflakes only reaches steps declaring `shell: python`, so helper
+          # scripts invoked from a bash run: block are invisible to
+          # actionlint. Lint them directly, in module form so no console
+          # script need exist.
+          mapfile -t py_files < <(git ls-files '*.py')
+          if [ ${#py_files[@]} -gt 0 ]; then
+            printf 'pyflakes: %s\n' "${py_files[@]}"
+            python3 -m pyflakes "${py_files[@]}"
+          else
+            echo "pyflakes: no python files"
+          fi
+
+          if [ "$SHELLCHECK_SCRIPTS" = "true" ]; then
+            mapfile -t sh_files < <(git ls-files '*.sh')
+            if [ ${#sh_files[@]} -gt 0 ]; then
+              printf 'shellcheck: %s\n' "${sh_files[@]}"
+              shellcheck -x --severity=warning "${sh_files[@]}"
+            fi
+          fi
+
+          # No `|| true`: if this does not resolve the assignment fails under
+          # `set -e`. An empty -pyflakes would disable Python analysis
+          # silently.
+          pyflakes_bin="$(command -v pyflakes)"
+          actionlint -color -pyflakes "$pyflakes_bin"
+
+          if [ "$RUN_ZIZMOR" != "true" ]; then
+            echo "::notice::zizmor skipped (run-zizmor=false); run it locally before merging workflow changes"
+            exit 0
+          fi
+
+          # zizmor gets explicit paths, not a directory to walk: a walk
+          # honours .gitignore and, unlike git, does not exempt tracked
+          # files -- and two of our repos ignore a bare `actions/`, which
+          # matches `.github/actions/` at any depth. Discovery is git
+          # ls-files so definitions are found wherever they live, in either
+          # spelling.
+          zizmor_inputs=(.github/workflows/)
+          mapfile -t action_files < <(git ls-files | grep -E '(^|/)action\.ya?ml$' || true)
+          if [ ${#action_files[@]} -gt 0 ]; then
+            zizmor_inputs+=("${action_files[@]}")
+          fi
+          printf 'zizmor input: %s\n' "${zizmor_inputs[@]}"
+
+          # Run the full audit set. Four audits resolve a referenced
+          # repository's refs over git: impostor-commit, stale-action-refs and
+          # ref-version-mismatch for hash pins, ref-confusion for tag pins. If
+          # that repository is private and this token cannot read it, they
+          # abort the whole run with 403 instead of reporting findings.
+          #
+          # Fall back to running without those four, loudly, so a missing,
+          # expired or revoked token costs coverage rather than breaking CI.
+          # The match needs both halves: the run must have died in one of the
+          # four audits we are prepared to drop, AND for want of access. A
+          # real finding or any other error still fails the job. Note the
+          # terminal message varies with the token -- a PAT that cannot see
+          # the repo surfaces the raw 403 on git-upload-pack, while
+          # github.token gets zizmor's own "no access" wording -- so match
+          # several. If zizmor changes all of them the match stops working
+          # and CI fails, which is the safe direction.
+          zcfg=()
+          if out="$(zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
+            printf '%s\n' "$out"
+          elif printf '%s' "$out" | grep -qE "'(impostor-commit|stale-action-refs|ref-version-mismatch|ref-confusion)' audit failed" &&
+               printf '%s' "$out" | grep -qE 'no access|403 Forbidden|401 Unauthorized|git-upload-pack'; then
+            echo "::warning::zizmor could not read a referenced private repository, so impostor-commit, stale-action-refs, ref-version-mismatch and ref-confusion were skipped. Supply a lint-token with Contents: read on that repository to restore them."
+            fallback="$(mktemp)"
+            python3 - "$fallback" <<'PYEOF'
+          import os, re, sys
+
+          SKIP = ("impostor-commit", "stale-action-refs", "ref-version-mismatch",
+                  "ref-confusion")
+          path = ".github/zizmor.yml"
+          src = open(path).read() if os.path.exists(path) else ""
+
+          # Drop any existing entry for these three, whatever it says.
+          for a in SKIP:
+              src = re.sub(r"^  {}:\n(?:    .*\n|\n(?=    ))*".format(re.escape(a)),
+                           "", src, flags=re.M)
+
+          if "rules:" not in src:
+              src = (src.rstrip("\n") + "\n\nrules:\n") if src.strip() else "rules:\n"
+          extra = "".join("  {}:\n    disable: true\n".format(a) for a in SKIP)
+          open(sys.argv[1], "w").write(src.rstrip("\n") + "\n" + extra)
+          PYEOF
+            zcfg=(--config "$fallback")
+            zizmor --no-progress "${zcfg[@]}" "${zizmor_inputs[@]}"
+          else
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+          if [ "$ZIZMOR_PEDANTIC" = "true" ]; then
+            echo "--- pedantic pass (advisory only) ---"
+            zizmor --no-progress "${zcfg[@]}" --persona=pedantic "${zizmor_inputs[@]}" || true
+          fi

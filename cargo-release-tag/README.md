@@ -1,0 +1,116 @@
+# Cargo Release Tag
+
+A GitHub Action that tags HEAD with the crate version, pushes the tag, and
+decides whether **this commit is the release commit for that version** — the
+invariant it protects is that a version is only ever published from the
+commit its tag points at.
+
+## Why not just tag and push?
+
+Release workflows re-run: after a partial failure, on a later commit by
+mistake, or for crates that deliberately don't bump every release. The naive
+`git tag && git push || true` pattern has two silent failure modes:
+
+- a rejected push gets ignored, and the run publishes crate content from a
+  commit **other** than the one the tag marks;
+- a "tag already exists" skip drops a genuinely bumped crate from the
+  release without anyone noticing.
+
+This action distinguishes the cases explicitly, consulting the registry when
+git alone cannot tell them apart.
+
+## Behavior
+
+1. Extracts the version (like `cargo-version-tag`: the first listed
+   package's version is the reference, and every listed package must match).
+2. Creates the tag `<tag-prefix><version>` at HEAD and pushes it.
+3. Decides:
+
+| Situation | Result |
+|-----------|--------|
+| Tag pushed (new), or remote tag already points at HEAD | `released=true` |
+| Push rejected, tag absent on the remote | **fail** (push problem) |
+| Remote tag on another commit, `on-existing-tag: fail` | **fail** — bump the version or re-run from the tagged commit |
+| Remote tag on another commit, `skip-if-published`, version **published** | `released=false` — the crate wasn't bumped this release; skip its publish/docs |
+| Remote tag on another commit, `skip-if-published`, version **not published** | **fail** — a previous run died between tag push and publish; publishing HEAD would ship content that doesn't match the tag |
+
+The registry probe fails closed: if the index can't be reached, the action
+fails rather than guessing.
+
+## Usage
+
+Strict release tag (the whole workspace releases together — any pre-existing
+tag on another commit means someone forgot to bump):
+
+```yaml
+- name: Tag commit with version
+  id: publish-tag
+  uses: ./actions/cargo-release-tag
+  with:
+    packages: crate-a crate-b crate-c
+    github-token: ${{ github.token }}
+```
+
+Independently-versioned crate that doesn't bump every release:
+
+```yaml
+- name: Tag my-crate
+  id: tag-my-crate
+  uses: ./actions/cargo-release-tag
+  with:
+    packages: my-crate
+    tag-prefix: 'my-crate-v'
+    github-token: ${{ github.token }}
+    on-existing-tag: 'skip-if-published'
+    registry-name: groundhog
+    registry-token: ${{ secrets.REGISTRY_TOKEN }}
+
+- name: Publish my-crate
+  if: ${{ steps.tag-my-crate.outputs.released == 'true' }}
+  uses: ./actions/cargo-publish
+  with:
+    packages: my-crate
+    git-tag: ${{ steps.tag-my-crate.outputs.tag }}
+    tag-prefix: 'my-crate-v'
+    ...
+```
+
+## Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `cargo-toml-path` | Path to the workspace root Cargo.toml | No | `./Cargo.toml` |
+| `packages` | Space-separated packages that must share one version (first is the reference); all workspace packages if empty | No | |
+| `tag-prefix` | Prefix for the git tag | No | `v` |
+| `github-token` | Token used to push the tag | Yes | |
+| `on-existing-tag` | `fail` or `skip-if-published` (see Behavior) | No | `fail` |
+| `registry-name` | Registry name from `.cargo/config.toml` (sparse index); required for `skip-if-published` | No | |
+| `registry-token` | Registry token, sent verbatim in `Authorization` for the index probe, exactly as cargo sends it; required for `skip-if-published` | No | |
+
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `version` | The version extracted from Cargo.toml |
+| `tag` | The full git tag name |
+| `released` | `true` iff this commit is the release commit for the version; gate publish/docs steps on it |
+
+## Requirements
+
+- Rust toolchain, `jq`, and `curl` on the runner
+- Repository checked out at the commit to release, run from the repo root
+- The registry defined as an inline `name = { index = "sparse+https://..." }`
+  entry in `.cargo/config.toml` (for `skip-if-published`)
+
+The action reaches GitHub over HTTPS with `github-token` and leaves the local
+git configuration untouched, so `origin` keeps the credentials
+`actions/checkout` persisted and later steps in the job can use it.
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](../LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.

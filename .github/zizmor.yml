@@ -1,0 +1,15 @@
+# zizmor configuration. https://docs.zizmor.sh/configuration/
+
+rules:
+  # zizmor asks for GitHub's self-repository syntax (`uses: $/workflow-lint`)
+  # instead of the workspace-relative `./workflow-lint`, and it is right to:
+  # the `$/` form cannot be satisfied by a directory cloned at runtime, and
+  # can be policy-enforced as pinned.
+  #
+  # We cannot adopt it yet. The syntax landed in July 2026; actionlint's
+  # latest release (1.7.12, 2026-03-30) predates it and rejects `$/...` as
+  # "invalid format because ref is missing". Both linters are blocking gates
+  # here, so they currently contradict each other.
+  self-repository:
+    ignore:
+      - ci.yml
