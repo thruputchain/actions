@@ -243,16 +243,17 @@ jobs:
           fi
           printf 'zizmor input: %s\n' "${zizmor_inputs[@]}"
 
-          # Run the full audit set. Four audits resolve a referenced
-          # repository's refs over git: impostor-commit, stale-action-refs and
-          # ref-version-mismatch for hash pins, ref-confusion for tag pins. If
-          # that repository is private and this token cannot read it, they
-          # abort the whole run with 403 instead of reporting findings.
+          # Run the full audit set. Five audits read a referenced repository:
+          # impostor-commit, stale-action-refs and ref-version-mismatch for hash
+          # pins, ref-confusion for tag pins, and known-vulnerable-actions,
+          # which lists the repository's tags. If that repository is private
+          # and this token cannot read it, they abort the whole run with 403
+          # instead of reporting findings.
           #
-          # Fall back to running without those four, loudly, so a missing,
+          # Fall back to running without those five, loudly, so a missing,
           # expired or revoked token costs coverage rather than breaking CI.
           # The match needs both halves: the run must have died in one of the
-          # four audits we are prepared to drop, AND for want of access. A
+          # five audits we are prepared to drop, AND for want of access. A
           # real finding or any other error still fails the job. Note the
           # terminal message varies with the token -- a PAT that cannot see
           # the repo surfaces the raw 403 on git-upload-pack, while
@@ -262,19 +263,19 @@ jobs:
           zcfg=()
           if out="$(zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
             printf '%s\n' "$out"
-          elif printf '%s' "$out" | grep -qE "'(impostor-commit|stale-action-refs|ref-version-mismatch|ref-confusion)' audit failed" &&
+          elif printf '%s' "$out" | grep -qE "'(impostor-commit|stale-action-refs|ref-version-mismatch|ref-confusion|known-vulnerable-actions)' audit failed" &&
                printf '%s' "$out" | grep -qE 'no access|403 Forbidden|401 Unauthorized|git-upload-pack'; then
-            echo "::warning::zizmor could not read a referenced private repository, so impostor-commit, stale-action-refs, ref-version-mismatch and ref-confusion were skipped. Supply a lint-token with Contents: read on that repository to restore them."
+            echo "::warning::zizmor could not read a referenced private repository, so impostor-commit, stale-action-refs, ref-version-mismatch, ref-confusion and known-vulnerable-actions were skipped. Supply a lint-token with Contents: read on that repository to restore them."
             fallback="$(mktemp)"
             python3 - "$fallback" <<'PYEOF'
           import os, re, sys
 
           SKIP = ("impostor-commit", "stale-action-refs", "ref-version-mismatch",
-                  "ref-confusion")
+                  "ref-confusion", "known-vulnerable-actions")
           path = ".github/zizmor.yml"
           src = open(path).read() if os.path.exists(path) else ""
 
-          # Drop any existing entry for these three, whatever it says.
+          # Drop any existing entry for these audits, whatever it says.
           for a in SKIP:
               src = re.sub(r"^  {}:\n(?:    .*\n|\n(?=    ))*".format(re.escape(a)),
                            "", src, flags=re.M)
