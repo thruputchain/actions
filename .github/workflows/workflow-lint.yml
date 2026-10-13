@@ -192,7 +192,7 @@ jobs:
         env:
           # The App token reads only thruputchain/actions and is revoked
           # by the token action after the job. Other callers retain their token.
-          GH_TOKEN: ${{ steps.lint-app-token.outputs.token || secrets.lint-token || github.token }}
+          GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
           ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
           RUN_ZIZMOR: ${{ inputs.run-zizmor }}
           SHELLCHECK_SCRIPTS: ${{ inputs.shellcheck-scripts }}
