@@ -1,0 +1,105 @@
+name: 'crates.io Publish'
+description: 'Publishes a group of same-version Rust crates to crates.io: creates crates that do not exist yet with a bootstrap token and registers their trusted publisher, publishes new versions through trusted publishing, and skips versions already published.'
+author: 'Groundhog Team'
+
+inputs:
+  mode:
+    description: >-
+      "check": decide, without side effects, whether this commit releases the
+      group, and verify everything publishing would reject; run it before
+      cargo-release-tag. "publish": publish from the commit git-tag marks.
+    required: true
+  packages:
+    description: 'Space-separated workspace packages, in dependency order (each after its dependencies). All must share one version.'
+    required: true
+  tag-prefix:
+    description: 'Release tag prefix: the tag is `<tag-prefix><version>`.'
+    required: false
+    default: 'v'
+  on-existing-tag:
+    description: >-
+      check: what to do when the release tag already exists on another
+      commit. "fail" (default): error out; a new commit needs a version bump.
+      "skip-if-published": release=false (this commit doesn't release the
+      group) when every package's version is on crates.io and `cargo package`
+      builds the same crate as at the tag; otherwise error out.
+    required: false
+    default: 'fail'
+  git-tag:
+    description: 'publish: the release tag, which must point at HEAD and match the packages'' version (cargo-release-tag''s `tag` output).'
+    required: false
+    default: ''
+  bootstrap-token:
+    description: >-
+      crates.io API token used only to create crates that don't exist yet and
+      register their trusted publisher. Scopes: publish-new and
+      trusted-publishing, plus change-owners for crate-owners. Needed only
+      while the group contains a crate not on crates.io; when set, publish
+      also registers the trusted publisher for existing crates that lack one.
+    required: false
+    default: ''
+  crate-owners:
+    description: 'publish: space-separated owners invited to each crate this run creates, as `cargo owner --add` takes them (`github:org:team` or a username).'
+    required: false
+    default: ''
+  publish-args:
+    description: 'publish: extra `cargo publish` arguments, e.g. "--all-features".'
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: "check: the group's version."
+    value: ${{ steps.check.outputs.version }}
+  tag:
+    description: 'check: the release tag, `<tag-prefix><version>`.'
+    value: ${{ steps.check.outputs.tag }}
+  release:
+    description: >-
+      check: "true" when this commit releases the group, so tag and publish;
+      "false" when skip-if-published found it released from an earlier commit.
+    value: ${{ steps.check.outputs.release }}
+  new-crates:
+    description: "check: the packages that don't exist on crates.io yet."
+    value: ${{ steps.check.outputs.new-crates }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check release
+      id: check
+      if: inputs.mode == 'check'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PACKAGES: ${{ inputs.packages }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        ON_EXISTING_TAG: ${{ inputs.on-existing-tag }}
+        BOOTSTRAP_TOKEN: ${{ inputs.bootstrap-token }}
+      run: bash "$ACTION_PATH/check.sh"
+
+    - name: Publish to crates.io
+      if: inputs.mode == 'publish'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PACKAGES: ${{ inputs.packages }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        GIT_TAG: ${{ inputs.git-tag }}
+        BOOTSTRAP_TOKEN: ${{ inputs.bootstrap-token }}
+        CRATE_OWNERS: ${{ inputs.crate-owners }}
+        PUBLISH_ARGS: ${{ inputs.publish-args }}
+      run: bash "$ACTION_PATH/publish.sh"
+
+    - name: Reject unknown mode
+      if: inputs.mode != 'check' && inputs.mode != 'publish'
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        echo "::error::mode must be \"check\" or \"publish\", not \"$MODE\""
+        exit 1
+
+branding:
+  icon: 'package'
+  color: 'orange'
