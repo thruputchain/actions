@@ -148,9 +148,14 @@ trusted publisher for existing crates that lack one, such as crates first publis
 every crate exists, remove the secret and revoke the token. crates.io matches trusted publishers on
 the **calling** workflow's file name, which is the name the workflow registers.
 
+To gate releases on a GitHub environment (for example, required reviewers), pass `environment:`.
+The calling job can't set one on a job that uses a reusable workflow. Trusted publishers the workflow
+registers are then scoped to that environment.
+
 A release made of independently versioned groups (for example, an API crate with its own tag) calls
 the workflow once per group. Chain the jobs with `needs:`, pass `on-existing-tag: skip-if-published`
-for groups that don't release every time, and list earlier groups in later calls'
+for groups that don't release every time (a group counts as unchanged when `cargo package` builds
+the same crates at HEAD as at its tag), and list earlier groups in later calls'
 `vendor-workspace-deps`.
 
 **Outputs:** `version`, `tag`, `released` (`false` when `skip-if-published` found the group already

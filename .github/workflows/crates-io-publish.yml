@@ -71,8 +71,8 @@ on:
           (default): error out; a new commit needs a version bump. Use
           "skip-if-published" for a group that legitimately doesn't release
           every time: the run then succeeds without tagging or publishing,
-          provided every package's version is on crates.io and no package
-          directory changed since the tag.
+          provided every package's version is on crates.io and its package
+          (as `cargo package` builds it) is unchanged since the tag.
         type: string
         required: false
         default: fail
@@ -123,6 +123,16 @@ on:
         type: string
         required: false
         default: ubuntu-latest
+      environment:
+        description: >-
+          GitHub environment the publish job runs in, e.g. to gate releases on
+          approval. The caller can't set one on a job that calls a reusable
+          workflow, so it is passed here. Trusted publishers this workflow
+          registers are scoped to it, and one scoped to another environment
+          doesn't count as this workflow's.
+        type: string
+        required: false
+        default: ""
     secrets:
       crates-io-bootstrap-token:
         description: >-
@@ -147,6 +157,8 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ${{ inputs.runs-on }}
+    # Empty means no environment.
+    environment: ${{ inputs.environment }}
     permissions:
       contents: write # pushes the release tag
       id-token: write # crates.io trusted publishing
@@ -189,6 +201,9 @@ jobs:
             echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
           elif [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
             rustup toolchain install --no-self-update
+            # A minimal-profile toolchain file may list neither, and the dry
+            # run runs both.
+            rustup component add clippy rustfmt
           else
             rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
             echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
@@ -316,14 +331,36 @@ jobs:
               echo "::error::Bump the version to release this commit, or delete the tag if $VERSION was never published"
               exit 1
             fi
+            # "Unchanged" means crates.io would receive the same crate: compare
+            # the packages built from the tag and from HEAD. That covers what
+            # a diff of the crate's directory misses, such as inherited
+            # [workspace.package] and [workspace.dependencies] values and
+            # files from outside it (readme = "../README.md"), and ignores
+            # workspace changes that don't reach the crate. No lockfile: it
+            # doesn't affect a library's consumers, and packaging one would
+            # need every workspace dependency on crates.io already.
+            packaged() { # packaged <checkout> <package> <dir>
+              local target
+              target=$(mktemp -d)
+              (cd "$1" && cargo package --quiet --no-verify --allow-dirty --exclude-lockfile \
+                -p "$2" --target-dir "$target")
+              mkdir -p "$3"
+              tar -xzf "$target/package/$2-$VERSION.crate" -C "$3" --strip-components=1
+              rm -f "$3/.cargo_vcs_info.json" "$3/Cargo.toml.orig"
+            }
+            TAG_TREE=$(mktemp -d)
+            git worktree add --quiet --detach "$TAG_TREE" "$TAG_SHA"
+            trap 'git worktree remove --force "$TAG_TREE"' EXIT
             for pkg in $PACKAGES; do
               if ! on_index "$pkg" "$VERSION"; then
                 echo "::error::Tag $TAG points at $TAG_SHA (not this commit) but $pkg@$VERSION is not on crates.io"
                 echo "::error::A previous release likely died between tag push and publish. Re-run it from the tagged commit, or delete the stale tag"
                 exit 1
               fi
-              dir=$(dirname "$(field "$pkg" .manifest_path | jq -r .)")
-              if ! git diff --quiet "$TAG_SHA" HEAD -- "$dir"; then
+              CMP=$(mktemp -d)
+              packaged "$TAG_TREE" "$pkg" "$CMP/tag"
+              packaged . "$pkg" "$CMP/head"
+              if ! diff -r "$CMP/tag" "$CMP/head"; then
                 echo "::error::$pkg changed since $TAG ($TAG_SHA) but its version was not bumped"
                 exit 1
               fi
@@ -388,6 +425,7 @@ jobs:
           PUBLISH_ARGS: ${{ inputs.publish-args }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           REPOSITORY: ${{ github.repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -euo pipefail
           API=https://crates.io/api/v1
@@ -445,15 +483,19 @@ jobs:
                   --data @- "$API/trusted_publishing/tokens")
             if [ "$(status "$resp")" != 200 ]; then
               echo "::error::crates.io refused the trusted publishing exchange (HTTP $(status "$resp")): $(detail "$resp")"
-              echo "::error::Add a trusted publisher on crates.io for $REPOSITORY, workflow $WORKFLOW_FILE, or set the crates-io-bootstrap-token secret so this workflow adds it"
+              echo "::error::Add a trusted publisher on crates.io for $REPOSITORY, workflow $WORKFLOW_FILE${ENVIRONMENT:+, environment $ENVIRONMENT}, or set the crates-io-bootstrap-token secret so this workflow adds it"
               exit 1
             fi
             OIDC_TOKEN=$(body "$resp" | jq -r .token)
             echo "::add-mask::$OIDC_TOKEN"
           }
 
-          # Registers this repository's calling workflow as $1's trusted
-          # publisher unless it already is. Returns non-zero on failure.
+          # Registers this repository's calling workflow (in ENVIRONMENT, if
+          # set) as $1's trusted publisher unless a config already lets this
+          # job publish. As crates.io matches them, a config with no
+          # environment accepts any job; one with an environment accepts
+          # only jobs in it, compared case-insensitively. Returns non-zero
+          # on failure.
           ensure_trusted_publisher() {
             local crate="$1" resp
             resp=$(api "$BOOTSTRAP_TOKEN" "$API/trusted_publishing/github_configs?crate=$crate")
@@ -462,20 +504,24 @@ jobs:
               return 1
             fi
             if body "$resp" | jq -e --arg o "${REPO_OWNER,,}" --arg r "${REPO_NAME,,}" --arg w "$WORKFLOW_FILE" \
+                --arg e "${ENVIRONMENT,,}" \
                 '.github_configs[] | select((.repository_owner | ascii_downcase) == $o
-                  and (.repository_name | ascii_downcase) == $r and .workflow_filename == $w)' >/dev/null; then
-              echo "OK: $crate already trusts $REPOSITORY $WORKFLOW_FILE"
+                  and (.repository_name | ascii_downcase) == $r and .workflow_filename == $w
+                  and (.environment == null or (.environment | ascii_downcase) == $e))' >/dev/null; then
+              echo "OK: $crate already trusts $REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ in $ENVIRONMENT}"
               return 0
             fi
             resp=$(jq -n --arg c "$crate" --arg o "$REPO_OWNER" --arg r "$REPO_NAME" --arg w "$WORKFLOW_FILE" \
-                '{github_config: {crate: $c, repository_owner: $o, repository_name: $r, workflow_filename: $w, environment: null}}' \
+                --arg e "$ENVIRONMENT" \
+                '{github_config: {crate: $c, repository_owner: $o, repository_name: $r, workflow_filename: $w,
+                  environment: (if $e == "" then null else $e end)}}' \
               | api "$BOOTSTRAP_TOKEN" -X POST -H 'Content-Type: application/json' --data @- \
                   "$API/trusted_publishing/github_configs")
             if [ "$(status "$resp")" != 200 ]; then
               echo "::warning::Could not add $REPOSITORY $WORKFLOW_FILE as trusted publisher of $crate (HTTP $(status "$resp")): $(detail "$resp")"
               return 1
             fi
-            echo "OK: $crate now trusts $REPOSITORY $WORKFLOW_FILE"
+            echo "OK: $crate now trusts $REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ in $ENVIRONMENT}"
           }
 
           # crates.io rate-limits new crates (a small burst, then one every
