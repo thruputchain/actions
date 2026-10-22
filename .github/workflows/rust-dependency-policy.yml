@@ -42,9 +42,28 @@ on:
         type: string
         required: false
         default: ""
+      git-app-id:
+        description: >-
+          Optional GitHub App ID for fetching private git dependencies. The
+          App must be installed on every repository in git-repositories.
+        type: string
+        required: false
+        default: ""
+      git-repositories:
+        description: >-
+          Comma-separated names of the repositories, under the caller's
+          owner, that the graph has git dependencies on (e.g.
+          "thruput-protocol-rs,bristlecone"). Empty means every repository the
+          App's installation covers.
+        type: string
+        required: false
+        default: ""
     secrets:
       registry-token:
         description: "Token for registry-name. Required only if it is set."
+        required: false
+      git-app-private-key:
+        description: "Private key for the App identified by git-app-id."
         required: false
 
 jobs:
@@ -66,12 +85,27 @@ jobs:
         with:
           tool: cargo-deny@${{ inputs.cargo-deny-version }}
 
+      # cargo-deny resolves the graph with `cargo metadata`, which fetches
+      # every git dependency, so a private one needs read access to its
+      # repository.
+      - name: Generate git dependency token
+        if: inputs.git-app-id != ''
+        id: git-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.git-app-id }}
+          private-key: ${{ secrets.git-app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.git-repositories }}
+          permission-contents: read
+
       - name: Check dependency policy
         env:
           RUSTUP_TOOLCHAIN: ${{ inputs.toolchain }}
           CHECKS: ${{ inputs.checks }}
           REGISTRY_NAME: ${{ inputs.registry-name }}
           REGISTRY_TOKEN: ${{ secrets.registry-token }}
+          GIT_TOKEN: ${{ steps.git-app-token.outputs.token }}
         run: |
           set -euo pipefail
 
@@ -87,6 +121,21 @@ jobs:
             suffix="$(printf '%s' "$REGISTRY_NAME" | tr '[:lower:]-' '[:upper:]_')"
             export "CARGO_REGISTRIES_${suffix}_TOKEN=$REGISTRY_TOKEN"
             export CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS="cargo:token"
+          fi
+
+          # Git dependencies are fetched over HTTPS with the App token,
+          # whatever URL the manifest names. Like the registry token, the
+          # rewrite lives only in this step's environment. The git CLI reads
+          # GIT_CONFIG_*; cargo's built-in git transport does not, hence
+          # git-fetch-with-cli. Cargo.lock keeps the manifest's URLs, so
+          # deny.toml's allow-git still matches them.
+          if [ -n "$GIT_TOKEN" ]; then
+            export CARGO_NET_GIT_FETCH_WITH_CLI=true
+            export GIT_CONFIG_COUNT=2
+            export GIT_CONFIG_KEY_0="url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf"
+            export GIT_CONFIG_VALUE_0="ssh://git@github.com/"
+            export GIT_CONFIG_KEY_1="url.https://x-access-token:${GIT_TOKEN}@github.com/.insteadOf"
+            export GIT_CONFIG_VALUE_1="https://github.com/"
           fi
 
           # Graph flags must precede the subcommand; cargo-deny rejects them
