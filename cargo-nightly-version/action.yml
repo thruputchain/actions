@@ -56,8 +56,8 @@ runs:
           # Ephemeral local commit so cargo package/publish see a clean tree.
           # NOT pushed; the caller tags the original pre-bump commit. Only the
           # manifest is staged (avoids staging the runtime actions/ or vendor/ dirs).
-          git config user.email "nightly-bot@groundhog.local"
-          git config user.name "nightly-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
           git add -- "$CARGO_TOML_PATH"
           git commit -q -m "ephemeral nightly version $NEW (not pushed)"
         fi
