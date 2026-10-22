@@ -1,0 +1,548 @@
+name: crates.io publish
+
+# Reusable: releases one group of workspace crates that share a version to
+# crates.io, creating any crate that doesn't exist there yet. Called as
+#
+#   jobs:
+#     publish:
+#       permissions:
+#         contents: write # pushes the release tag
+#         id-token: write # crates.io trusted publishing
+#       uses: thruputchain/actions/.github/workflows/crates-io-publish.yml@<ref>
+#       with:
+#         packages: my-crate-macros my-crate # dependency order
+#       secrets:
+#         crates-io-bootstrap-token: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+#
+# from a workflow_dispatch (or push/release) workflow in the crate's
+# repository. Each run, in order, with nothing tagged or published until
+# every check has passed:
+#
+#   1. Dry run: the cargo-publish-dry-run action verifies every package
+#      offline (feature powerset, docs, packaging) against crates.io deps.
+#   2. Preflight: every package is publishable to crates.io and shares one
+#      version; the `<tag-prefix><version>` tag is free or already on HEAD
+#      (see on-existing-tag); and every crate that doesn't exist on crates.io
+#      yet can be created (the bootstrap token is set, the name is free).
+#   3. Tag HEAD and push the tag.
+#   4. Publish each package in order, skipping versions crates.io already
+#      has, so a run that fails partway is resumed by re-running it on the
+#      tagged commit.
+#
+# Authentication. Existing crates publish through crates.io trusted
+# publishing: the job exchanges a GitHub OIDC token for a 30-minute
+# crates.io token per crate, then revokes it. crates.io matches the
+# *calling* workflow's file (e.g. `publish.yml`), not this one, so that is
+# the file a crate's trusted publisher names.
+#
+# Trusted publishing can't create a crate, so a crate's first publish uses
+# the `crates-io-bootstrap-token` secret: a crates.io API token with the
+# scopes publish-new and trusted-publishing (plus change-owners when
+# crate-owners is set), crate-scoped as tightly as you like. Right after
+# creating a crate the job registers the calling workflow as its trusted
+# publisher and invites crate-owners, so later releases need no token.
+# When the secret is set, the job also registers the trusted publisher for
+# existing crates in the group that lack one (e.g. crates first published by
+# hand), so it doubles as the migration path. Leave it unset once every
+# crate exists, and revoke the token.
+#
+# A release made of several groups versioned independently (an API crate
+# with its own tag, say) calls this once per group, the later jobs needing
+# the earlier ones; pass the earlier groups' packages to later calls as
+# vendor-workspace-deps so their offline dry run can resolve them.
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          Space-separated workspace packages to release, in dependency order
+          (each one's dependencies first). All must share one version.
+        type: string
+        required: true
+      tag-prefix:
+        description: 'Release tag prefix: the tag is `<tag-prefix><version>`.'
+        type: string
+        required: false
+        default: "v"
+      on-existing-tag:
+        description: >-
+          When the release tag already exists on another commit. "fail"
+          (default): error out; a new commit needs a version bump. Use
+          "skip-if-published" for a group that legitimately doesn't release
+          every time: the run then succeeds without tagging or publishing,
+          provided every package's version is on crates.io and no package
+          directory changed since the tag.
+        type: string
+        required: false
+        default: fail
+      dry-run:
+        description: "Run the dry run and preflight only: no tag, no publish."
+        type: boolean
+        required: false
+        default: false
+      crate-owners:
+        description: >-
+          Space-separated owners invited to each crate this run creates, as
+          `cargo owner --add` takes them (`github:org:team` or a crates.io
+          username). Needs the change-owners scope on the bootstrap token.
+        type: string
+        required: false
+        default: ""
+      publish-args:
+        description: 'Extra `cargo publish` arguments, e.g. "--all-features".'
+        type: string
+        required: false
+        default: ""
+      vendor-workspace-deps:
+        description: >-
+          Workspace packages released by an earlier group of the same
+          release, for the dry run to package into vendor/ first.
+        type: string
+        required: false
+        default: ""
+      cargo-hack-feature-options:
+        description: "Dry run feature options for cargo-hack."
+        type: string
+        required: false
+        default: "--feature-powerset"
+      cargo-hack-version:
+        description: "Exact cargo-hack version for the dry run."
+        type: string
+        required: false
+        default: "0.6.45"
+      toolchain:
+        description: >-
+          Rust toolchain to install and use. Empty (default) installs the
+          one rust-toolchain.toml names, or stable without one.
+        type: string
+        required: false
+        default: ""
+      runs-on:
+        description: "Runner label. Any Linux x86-64 runner."
+        type: string
+        required: false
+        default: ubuntu-latest
+    secrets:
+      crates-io-bootstrap-token:
+        description: >-
+          crates.io API token used only to create crates and register their
+          trusted publisher. Required only while the group contains a crate
+          that doesn't exist on crates.io.
+        required: false
+    outputs:
+      version:
+        description: "The group's version."
+        value: ${{ jobs.publish.outputs.version }}
+      tag:
+        description: "The release tag."
+        value: ${{ jobs.publish.outputs.tag }}
+      released:
+        description: >-
+          "true" when this commit releases the group; "false" when
+          skip-if-published found it already released from an earlier commit.
+        value: ${{ jobs.publish.outputs.released }}
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write # pushes the release tag
+      id-token: write # crates.io trusted publishing
+    outputs:
+      version: ${{ steps.preflight.outputs.version }}
+      tag: ${{ steps.preflight.outputs.tag }}
+      released: ${{ steps.preflight.outputs.released }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_TERM_COLOR: always
+      PACKAGES: ${{ inputs.packages }}
+      USER_AGENT: "thruputchain-actions/crates-io-publish (https://github.com/thruputchain/actions)"
+    steps:
+      # The github context inside a reusable workflow refers to the caller,
+      # so this checks out the calling repository. No persisted credentials:
+      # the tag action pushes with github.token itself. Full history brings
+      # every tag, so preflight reads them locally.
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Rust
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
+              --location --silent --show-error --fail https://sh.rustup.rs \
+              | sh -s -- --default-toolchain none --profile minimal -y
+            echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+            echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+            export PATH="$CARGO_HOME/bin:$PATH"
+          fi
+          if [ -n "$TOOLCHAIN" ]; then
+            rustup toolchain install "$TOOLCHAIN" --profile minimal --component clippy,rustfmt --no-self-update
+            echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          elif [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            rustup toolchain install --no-self-update
+          else
+            rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+            echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+          fi
+          # The dry-run action sources this file.
+          if [ ! -f "$HOME/.cargo/env" ]; then
+            mkdir -p "$HOME/.cargo"
+            : > "$HOME/.cargo/env"
+          fi
+          cargo --version
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-hack@${{ inputs.cargo-hack-version }}
+
+      - name: Publish dry run
+        uses: thruputchain/actions/cargo-publish-dry-run@7f385abc0f1a9f20840422ca6e971aaf120dbd4b
+        with:
+          packages: ${{ inputs.packages }}
+          registry-name: crates-io
+          cargo-hack-feature-options: ${{ inputs.cargo-hack-feature-options }}
+          vendor-workspace-deps: ${{ inputs.vendor-workspace-deps }}
+
+      # Everything the tag and publish steps would reject, checked without
+      # side effects, so a failure here pushes no tag. Runs in dry runs too:
+      # they are the way to check a release commit before tagging it.
+      - name: Preflight
+        id: preflight
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          ON_EXISTING_TAG: ${{ inputs.on-existing-tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          HAS_BOOTSTRAP_TOKEN: ${{ secrets.crates-io-bootstrap-token != '' }}
+        run: |
+          set -euo pipefail
+
+          case "$ON_EXISTING_TAG" in
+            fail | skip-if-published) ;;
+            *)
+              echo "::error::on-existing-tag must be \"fail\" or \"skip-if-published\", not \"$ON_EXISTING_TAG\""
+              exit 1
+              ;;
+          esac
+          if [ -z "${PACKAGES// /}" ]; then
+            echo "::error::packages is empty"
+            exit 1
+          fi
+
+          METADATA=$(cargo metadata --no-deps --format-version 1 --locked)
+          field() {
+            jq -c --arg name "$1" ".packages[] | select(.name == \$name) | $2" <<<"$METADATA"
+          }
+
+          # Prints "missing", or the crate's canonical name on crates.io,
+          # which treats - and _ (and case) as the same name.
+          crates_io_name() {
+            local body code
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
+              "https://crates.io/api/v1/crates/$1")
+            # crates.io asks crawlers for at most one request per second.
+            sleep 1
+            case "$code" in
+              200) jq -r '.crate.name' "$body" ;;
+              404) echo missing ;;
+              *)
+                echo "::error::crates.io lookup of '$1' failed (HTTP $code)" >&2
+                return 1
+                ;;
+            esac
+          }
+          # Whether the crates.io index lists $1@$2 (yanked or not).
+          on_index() {
+            local lower="${1,,}" path body code
+            case ${#lower} in
+              1) path="1/$lower" ;;
+              2) path="2/$lower" ;;
+              3) path="3/${lower:0:1}/$lower" ;;
+              *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
+            esac
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w '%{http_code}' "https://index.crates.io/$path")
+            case "$code" in
+              200) jq -r '.vers' "$body" | grep -qxF "$2" ;;
+              404) return 1 ;;
+              *)
+                echo "::error::crates.io index probe for '$1' failed (HTTP $code)"
+                exit 1
+                ;;
+            esac
+          }
+
+          VERSION=""
+          for pkg in $PACKAGES; do
+            version=$(field "$pkg" .version | jq -r .)
+            if [ -z "$version" ]; then
+              echo "::error::'$pkg' is not a package in this workspace"
+              exit 1
+            fi
+            # null: publishable anywhere; [] is publish = false.
+            if ! field "$pkg" .publish | jq -e '. == null or index("crates-io") != null' >/dev/null; then
+              echo "::error::$pkg sets publish = $(field "$pkg" .publish), which excludes crates.io"
+              echo "::error::Set publish = [\"crates-io\"] (or remove the field) and drop registry = \"...\" from its dependencies"
+              exit 1
+            fi
+            if [ -z "$VERSION" ]; then
+              VERSION="$version"
+            elif [ "$version" != "$VERSION" ]; then
+              echo "::error::$pkg is at $version but ${PACKAGES%% *} is at $VERSION; one call releases one version"
+              exit 1
+            fi
+          done
+
+          TAG="${TAG_PREFIX}${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          HEAD_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)
+
+          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            if [ "$ON_EXISTING_TAG" = fail ]; then
+              echo "::error::Tag $TAG already exists at $TAG_SHA, not at HEAD ($HEAD_SHA)"
+              echo "::error::Bump the version to release this commit, or delete the tag if $VERSION was never published"
+              exit 1
+            fi
+            for pkg in $PACKAGES; do
+              if ! on_index "$pkg" "$VERSION"; then
+                echo "::error::Tag $TAG points at $TAG_SHA (not this commit) but $pkg@$VERSION is not on crates.io"
+                echo "::error::A previous release likely died between tag push and publish. Re-run it from the tagged commit, or delete the stale tag"
+                exit 1
+              fi
+              dir=$(dirname "$(field "$pkg" .manifest_path | jq -r .)")
+              if ! git diff --quiet "$TAG_SHA" HEAD -- "$dir"; then
+                echo "::error::$pkg changed since $TAG ($TAG_SHA) but its version was not bumped"
+                exit 1
+              fi
+            done
+            echo "::notice::$TAG is already released from $TAG_SHA and nothing changed since; skipping this group"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NEW_CRATES=""
+          for pkg in $PACKAGES; do
+            name=$(crates_io_name "$pkg")
+            if [ "$name" = missing ]; then
+              NEW_CRATES="$NEW_CRATES $pkg"
+              echo "OK: $pkg is a new crate"
+              continue
+            fi
+            if [ "$name" != "$pkg" ]; then
+              echo "::error::crates.io already has a crate named '$name', which it treats as the same name as '$pkg'"
+              exit 1
+            fi
+            # A re-run of a release commit finds its own versions published.
+            if [ -z "$TAG_SHA" ] && on_index "$pkg" "$VERSION"; then
+              echo "::error::$pkg@$VERSION is already on crates.io but $TAG does not exist in this repository"
+              echo "::error::Bump the version to release it from here"
+              exit 1
+            fi
+            echo "OK: $pkg exists on crates.io"
+          done
+
+          if [ -n "$NEW_CRATES" ] && [ "$HAS_BOOTSTRAP_TOKEN" != true ]; then
+            msg="Creating new crates ($NEW_CRATES ) needs the crates-io-bootstrap-token secret (scopes: publish-new, trusted-publishing)"
+            if [ "$DRY_RUN" = true ]; then
+              echo "::warning::$msg"
+            else
+              echo "::error::$msg"
+              exit 1
+            fi
+          fi
+
+          echo "new-crates=${NEW_CRATES# }" >> "$GITHUB_OUTPUT"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+      # Preflight has proven the tag is free or already on HEAD.
+      - name: Tag commit with version
+        if: inputs.dry-run == false && steps.preflight.outputs.released == 'true'
+        uses: thruputchain/actions/cargo-release-tag@7f385abc0f1a9f20840422ca6e971aaf120dbd4b
+        with:
+          packages: ${{ inputs.packages }}
+          tag-prefix: ${{ inputs.tag-prefix }}
+          github-token: ${{ github.token }}
+
+      # Publishes in the given order: each crate's publish-time verify build
+      # resolves its dependencies from crates.io, and `cargo publish` waits
+      # for the index to list a crate before returning.
+      - name: Publish
+        if: inputs.dry-run == false && steps.preflight.outputs.released == 'true'
+        env:
+          NEW_CRATES: ${{ steps.preflight.outputs.new-crates }}
+          BOOTSTRAP_TOKEN: ${{ secrets.crates-io-bootstrap-token }}
+          CRATE_OWNERS: ${{ inputs.crate-owners }}
+          PUBLISH_ARGS: ${{ inputs.publish-args }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          API=https://crates.io/api/v1
+          REPO_OWNER="${REPOSITORY%%/*}"
+          REPO_NAME="${REPOSITORY#*/}"
+          # owner/repo/.github/workflows/publish.yml@refs/heads/main -> publish.yml
+          WORKFLOW_FILE="${WORKFLOW_REF%%@*}"
+          WORKFLOW_FILE="${WORKFLOW_FILE##*/}"
+          FAILED=0
+
+          # Tokens travel in headers read from a file descriptor, never in argv.
+          api() { # api <auth-header-value> <curl args...>; prints body, then the status on its own line
+            local auth="$1"
+            shift
+            curl -sS -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" \
+              -H @<(printf 'Authorization: %s\n' "$auth") "$@"
+          }
+          status() { tail -n1 <<<"$1"; }
+          body() { sed '$d' <<<"$1"; }
+          detail() { body "$1" | jq -r '[.errors[]?.detail] | join("; ")' 2>/dev/null || true; }
+
+          on_index() {
+            local lower="${1,,}" path
+            case ${#lower} in
+              1) path="1/$lower" ;;
+              2) path="2/$lower" ;;
+              3) path="3/${lower:0:1}/$lower" ;;
+              *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
+            esac
+            curl -sSf "https://index.crates.io/$path" 2>/dev/null | jq -r '.vers' | grep -qxF "$2"
+          }
+
+          OIDC_TOKEN=""
+          revoke_oidc() {
+            if [ -n "$OIDC_TOKEN" ]; then
+              api "Bearer $OIDC_TOKEN" -o /dev/null -X DELETE "$API/trusted_publishing/tokens" >/dev/null || true
+              OIDC_TOKEN=""
+            fi
+          }
+          trap revoke_oidc EXIT
+
+          # A fresh token per crate: each lives 30 minutes, which a slow
+          # verify build or the new-crate rate limit could otherwise outlast.
+          exchange_oidc() {
+            local jwt resp
+            if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+              echo "::error::No GitHub OIDC token available: the calling job must grant id-token: write"
+              exit 1
+            fi
+            jwt=$(curl -sSf -H @<(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io" | jq -r .value)
+            echo "::add-mask::$jwt"
+            resp=$(jq -n --arg jwt "$jwt" '{jwt: $jwt}' \
+              | curl -sS -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" -H 'Content-Type: application/json' \
+                  --data @- "$API/trusted_publishing/tokens")
+            if [ "$(status "$resp")" != 200 ]; then
+              echo "::error::crates.io refused the trusted publishing exchange (HTTP $(status "$resp")): $(detail "$resp")"
+              echo "::error::Add a trusted publisher on crates.io for $REPOSITORY, workflow $WORKFLOW_FILE, or set the crates-io-bootstrap-token secret so this workflow adds it"
+              exit 1
+            fi
+            OIDC_TOKEN=$(body "$resp" | jq -r .token)
+            echo "::add-mask::$OIDC_TOKEN"
+          }
+
+          # Registers this repository's calling workflow as $1's trusted
+          # publisher unless it already is. Returns non-zero on failure.
+          ensure_trusted_publisher() {
+            local crate="$1" resp
+            resp=$(api "$BOOTSTRAP_TOKEN" "$API/trusted_publishing/github_configs?crate=$crate")
+            if [ "$(status "$resp")" != 200 ]; then
+              echo "::warning::Could not list trusted publishers of $crate (HTTP $(status "$resp")): $(detail "$resp")"
+              return 1
+            fi
+            if body "$resp" | jq -e --arg o "${REPO_OWNER,,}" --arg r "${REPO_NAME,,}" --arg w "$WORKFLOW_FILE" \
+                '.github_configs[] | select((.repository_owner | ascii_downcase) == $o
+                  and (.repository_name | ascii_downcase) == $r and .workflow_filename == $w)' >/dev/null; then
+              echo "OK: $crate already trusts $REPOSITORY $WORKFLOW_FILE"
+              return 0
+            fi
+            resp=$(jq -n --arg c "$crate" --arg o "$REPO_OWNER" --arg r "$REPO_NAME" --arg w "$WORKFLOW_FILE" \
+                '{github_config: {crate: $c, repository_owner: $o, repository_name: $r, workflow_filename: $w, environment: null}}' \
+              | api "$BOOTSTRAP_TOKEN" -X POST -H 'Content-Type: application/json' --data @- \
+                  "$API/trusted_publishing/github_configs")
+            if [ "$(status "$resp")" != 200 ]; then
+              echo "::warning::Could not add $REPOSITORY $WORKFLOW_FILE as trusted publisher of $crate (HTTP $(status "$resp")): $(detail "$resp")"
+              return 1
+            fi
+            echo "OK: $crate now trusts $REPOSITORY $WORKFLOW_FILE"
+          }
+
+          # crates.io rate-limits new crates (a small burst, then one every
+          # few minutes), so a 429 waits and retries instead of failing a
+          # first release halfway.
+          publish() { # publish <package> <token>
+            local pkg="$1" token="$2" attempt output rc
+            for attempt in $(seq 1 15); do
+              rc=0
+              # shellcheck disable=SC2086 # PUBLISH_ARGS is a list of flags
+              output=$(CARGO_REGISTRY_TOKEN="$token" cargo publish --locked -p "$pkg" $PUBLISH_ARGS 2>&1) || rc=$?
+              echo "$output"
+              if [ "$rc" -eq 0 ]; then
+                echo "OK: published $pkg"
+                return 0
+              fi
+              if grep -q 'status 429' <<<"$output" && [ "$attempt" -lt 15 ]; then
+                echo "crates.io rate limit (attempt $attempt); retrying in 2 minutes"
+                sleep 120
+                continue
+              fi
+              echo "::error::Failed to publish $pkg"
+              exit 1
+            done
+          }
+
+          for pkg in $PACKAGES; do
+            VERSION=$(cargo metadata --no-deps --format-version 1 --locked \
+              | jq -r --arg name "$pkg" '.packages[] | select(.name == $name) | .version')
+            IS_NEW=false
+            if [[ " $NEW_CRATES " == *" $pkg "* ]]; then
+              IS_NEW=true
+            fi
+
+            ENSURED=false
+            if on_index "$pkg" "$VERSION"; then
+              echo "SKIP: $pkg@$VERSION is already on crates.io"
+            elif [ "$IS_NEW" = true ]; then
+              echo "Creating $pkg@$VERSION with the bootstrap token"
+              publish "$pkg" "$BOOTSTRAP_TOKEN"
+              for owner in $CRATE_OWNERS; do
+                if CARGO_REGISTRY_TOKEN="$BOOTSTRAP_TOKEN" cargo owner --add "$owner" "$pkg"; then
+                  echo "OK: invited $owner to own $pkg"
+                else
+                  echo "::warning::Could not add $owner as an owner of $pkg; add it with cargo owner --add"
+                fi
+              done
+            else
+              # A crate first published by hand gets its trusted publisher
+              # here; without the bootstrap token it must already have one.
+              if [ -n "$BOOTSTRAP_TOKEN" ]; then
+                ensure_trusted_publisher "$pkg" || true
+                ENSURED=true
+              fi
+              exchange_oidc
+              publish "$pkg" "$OIDC_TOKEN"
+              revoke_oidc
+            fi
+
+            # Also on SKIP, so re-running a release whose first run died
+            # right after creating a crate still registers its publisher.
+            if [ -n "$BOOTSTRAP_TOKEN" ] && [ "$ENSURED" = false ] && ! ensure_trusted_publisher "$pkg"; then
+              if [ "$IS_NEW" = true ]; then
+                echo "::error::$pkg is published, but its next release can't use trusted publishing until $REPOSITORY $WORKFLOW_FILE is added as its trusted publisher on crates.io"
+                FAILED=1
+              fi
+            fi
+          done
+
+          exit "$FAILED"

@@ -96,6 +96,68 @@ accepts pre-release tags and keeps the tag, version-match, dependency-pin and do
 
 **Outputs:** `published-version` (the version that was published).
 
+## Reusable Workflows
+
+### crates-io-publish
+
+Releases a group of same-version workspace crates to crates.io, and is safe to re-run. For each
+crate it checks crates.io first:
+
+- **Not on crates.io:** creates it with the `crates-io-bootstrap-token` secret, invites
+  `crate-owners`, and registers the calling workflow as the crate's trusted publisher.
+- **On crates.io:** publishes the new version through trusted publishing (GitHub OIDC), with no
+  stored token.
+- **This version already published:** skips it, so a run that failed partway is resumed by
+  re-running it on the tagged commit.
+
+Before tagging `<tag-prefix><version>` or publishing anything, it runs `cargo-publish-dry-run` and a
+preflight. The preflight checks that every crate can go to crates.io, that the tag is free or already
+on HEAD, and that each new crate's name is free. crates.io treats `-` and `_` as the same, so
+`rpc_api` clashes with an existing `rpc-api`.
+
+**Usage:**
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish
+
+jobs:
+  publish:
+    permissions:
+      contents: write # pushes the release tag
+      id-token: write # crates.io trusted publishing
+    uses: thruputchain/actions/.github/workflows/crates-io-publish.yml@<sha>
+    with:
+      packages: my-crate-macros my-crate # dependency order
+      dry-run: ${{ inputs.dry-run }}
+      crate-owners: github:thruputchain:<team> # optional, for new crates
+    secrets:
+      # Only while a crate in `packages` doesn't exist on crates.io yet.
+      crates-io-bootstrap-token: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+```
+
+The bootstrap token is a crates.io API token with the scopes `publish-new` and `trusted-publishing`,
+plus `change-owners` if you set `crate-owners`. When it is set, the workflow also registers the
+trusted publisher for existing crates that lack one, such as crates first published by hand. Once
+every crate exists, remove the secret and revoke the token. crates.io matches trusted publishers on
+the **calling** workflow's file name, which is the name the workflow registers.
+
+A release made of independently versioned groups (for example, an API crate with its own tag) calls
+the workflow once per group. Chain the jobs with `needs:`, pass `on-existing-tag: skip-if-published`
+for groups that don't release every time, and list earlier groups in later calls'
+`vendor-workspace-deps`.
+
+**Outputs:** `version`, `tag`, `released` (`false` when `skip-if-published` found the group already
+released).
+
+## Notes
+
 ### semver.sh
 
 Not an action: the single definition of the semver grammar the publish and yank actions accept
