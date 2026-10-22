@@ -48,6 +48,9 @@ Your workflow must:
 1. Checkout the repository
 2. Install Rust toolchain with `rustfmt` and `clippy` components
 3. Have `jq` available (included in GitHub-hosted runners)
+4. Commit an up-to-date `Cargo.lock`: every cargo command that resolves dependencies runs with
+   `--locked`, so the action builds exactly the committed lockfile and fails if it is missing or
+   stale
 
 ## What This Action Does
 

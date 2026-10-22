@@ -67,7 +67,7 @@ runs:
         source "$HOME/.cargo/env"
         echo "Creating vendor directory..."
         mkdir -p vendor
-        cargo vendor --versioned-dirs
+        cargo vendor --locked --versioned-dirs
         echo "OK: Vendored dependencies to ./vendor/"
 
     - name: Pre-vendor workspace dependencies
@@ -84,7 +84,7 @@ runs:
         METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
         for package in $VENDOR_DEPS; do
           echo "Packaging $package for vendoring..."
-          cargo package --no-verify --package "$package" \
+          cargo package --locked --no-verify --package "$package" \
             --manifest-path "$CARGO_TOML_PATH" \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
@@ -197,7 +197,7 @@ runs:
         # Package all crates and extract to vendor
         for package in $PACKAGES; do
           echo "Packaging $package..."
-          cargo package --no-verify --package "$package" \
+          cargo package --locked --no-verify --package "$package" \
             --manifest-path "$CARGO_TOML_PATH" \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
@@ -239,6 +239,7 @@ runs:
           cargo hack $CARGO_HACK_OPTIONS \
             --ignore-private \
             --offline \
+            --locked \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
             --config "source.vendored-sources.directory = 'vendor'" \
@@ -267,6 +268,7 @@ runs:
             --target wasm32-unknown-unknown \
             --ignore-private \
             --offline \
+            --locked \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
             --config "source.vendored-sources.directory = 'vendor'" \
@@ -295,6 +297,7 @@ runs:
             --target riscv32im-unknown-none-elf \
             --ignore-private \
             --offline \
+            --locked \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
             --config "source.vendored-sources.directory = 'vendor'" \
@@ -330,7 +333,7 @@ runs:
           
           echo "Dry-run publish for $package..."
           # Uses --no-verify to skip rebuilding; that's already checked in the previous steps
-          cargo publish --dry-run --no-verify --package "$package" \
+          cargo publish --dry-run --locked --no-verify --package "$package" \
             --manifest-path "$CARGO_TOML_PATH" \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
@@ -379,7 +382,7 @@ runs:
             continue
           fi
           echo "Running clippy for $package..."
-          cargo clippy --manifest-path "$CARGO_TOML_PATH" --package "$package" --all-features \
+          cargo clippy --locked --manifest-path "$CARGO_TOML_PATH" --package "$package" --all-features \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
             --config "source.vendored-sources.directory = 'vendor'" \
@@ -480,7 +483,7 @@ runs:
           fi
 
           echo "Building documentation for $package..."
-          cargo doc --manifest-path "$CARGO_TOML_PATH" --package "$package" --no-deps --all-features \
+          cargo doc --locked --manifest-path "$CARGO_TOML_PATH" --package "$package" --no-deps --all-features \
             --config "source.${REGISTRY_NAME}.replace-with = 'vendored-sources'" \
             --config "source.crates-io.replace-with = 'vendored-sources'" \
             --config "source.vendored-sources.directory = 'vendor'"
