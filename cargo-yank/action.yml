@@ -105,6 +105,7 @@ runs:
         REGISTRY_TOKEN: ${{ inputs.registry-token }}
         CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
         PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         source "$HOME/.cargo/env"
@@ -170,11 +171,8 @@ runs:
             YANKED_COUNT=$((YANKED_COUNT + 1))
           else
             # Skip only when the registry itself answered that the crate or
-            # version is unknown. Cargo's own errors (an unconfigured
-            # registry: "registry index was not found", a missing token, a
-            # network failure) must fail the yank, not count as a skip.
-            if echo "$YANK_OUTPUT" | grep -qi "remote server responded with an error\|api errors" \
-              && echo "$YANK_OUTPUT" | grep -qi "status 404\|does not exist\|does not have a version\|has not been published"; then
+            # version is unknown; see registry-missing.sh.
+            if bash "$ACTION_PATH/registry-missing.sh" <<<"$YANK_OUTPUT"; then
               echo "SKIP: $package version $VERSION not found in registry"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
             else
