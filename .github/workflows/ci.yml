@@ -22,8 +22,10 @@ jobs:
     with:
       shellcheck-scripts: true
 
-  action-steps:
-    name: Action steps run from action.yml
+  dry-run-registry:
+    # Branch protection requires a check with this name; keep it when
+    # adding steps here.
+    name: Dry-run registry selection
     runs-on: ubuntu-latest
     permissions:
       contents: read
