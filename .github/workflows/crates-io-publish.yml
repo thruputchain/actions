@@ -288,7 +288,7 @@ jobs:
             body=$(mktemp)
             code=$(curl -sS -o "$body" -w '%{http_code}' "https://index.crates.io/$path")
             case "$code" in
-              200) jq -r '.vers' "$body" | grep -qxF "$2" ;;
+              200) jq -r '.vers' "$body" | grep -xF "$2" >/dev/null ;;
               404) return 1 ;;
               *)
                 echo "::error::crates.io index probe for '$1' failed (HTTP $code)"
@@ -455,7 +455,9 @@ jobs:
               3) path="3/${lower:0:1}/$lower" ;;
               *) path="${lower:0:2}/${lower:2:2}/$lower" ;;
             esac
-            curl -sSf "https://index.crates.io/$path" 2>/dev/null | jq -r '.vers' | grep -qxF "$2"
+            # Not grep -q: exiting at the first match can fail the writers
+            # with SIGPIPE, which pipefail reports as "not found".
+            curl -sSf "https://index.crates.io/$path" 2>/dev/null | jq -r '.vers' | grep -xF "$2" >/dev/null
           }
 
           OIDC_TOKEN=""
@@ -532,7 +534,7 @@ jobs:
             for attempt in $(seq 1 15); do
               rc=0
               # shellcheck disable=SC2086 # PUBLISH_ARGS is a list of flags
-              output=$(CARGO_REGISTRY_TOKEN="$token" cargo publish --locked -p "$pkg" $PUBLISH_ARGS 2>&1) || rc=$?
+              output=$(CARGO_REGISTRY_TOKEN="$token" cargo publish --registry crates-io --locked -p "$pkg" $PUBLISH_ARGS 2>&1) || rc=$?
               echo "$output"
               if [ "$rc" -eq 0 ]; then
                 echo "OK: published $pkg"
@@ -563,7 +565,7 @@ jobs:
               echo "Creating $pkg@$VERSION with the bootstrap token"
               publish "$pkg" "$BOOTSTRAP_TOKEN"
               for owner in $CRATE_OWNERS; do
-                if CARGO_REGISTRY_TOKEN="$BOOTSTRAP_TOKEN" cargo owner --add "$owner" "$pkg"; then
+                if CARGO_REGISTRY_TOKEN="$BOOTSTRAP_TOKEN" cargo owner --registry crates-io --add "$owner" "$pkg"; then
                   echo "OK: invited $owner to own $pkg"
                 else
                   echo "::warning::Could not add $owner as an owner of $pkg; add it with cargo owner --add"
@@ -572,22 +574,24 @@ jobs:
             else
               # A crate first published by hand gets its trusted publisher
               # here; without the bootstrap token it must already have one.
+              # Either way, publishing through OIDC proves it does.
               if [ -n "$BOOTSTRAP_TOKEN" ]; then
                 ensure_trusted_publisher "$pkg" || true
-                ENSURED=true
               fi
               exchange_oidc
               publish "$pkg" "$OIDC_TOKEN"
               revoke_oidc
+              ENSURED=true
             fi
 
             # Also on SKIP, so re-running a release whose first run died
             # right after creating a crate still registers its publisher.
+            # A failure fails the run (after the remaining crates), so the
+            # bootstrap token isn't retired with a crate left unable to
+            # publish through OIDC.
             if [ -n "$BOOTSTRAP_TOKEN" ] && [ "$ENSURED" = false ] && ! ensure_trusted_publisher "$pkg"; then
-              if [ "$IS_NEW" = true ]; then
-                echo "::error::$pkg is published, but its next release can't use trusted publishing until $REPOSITORY $WORKFLOW_FILE is added as its trusted publisher on crates.io"
-                FAILED=1
-              fi
+              echo "::error::$pkg is published, but can't use trusted publishing until $REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ (environment $ENVIRONMENT)} is added as its trusted publisher on crates.io"
+              FAILED=1
             fi
           done
 
