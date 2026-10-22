@@ -357,7 +357,7 @@ runs:
 
         # Set registry token via environment variable
         # The registry index is configured in .cargo/config.toml
-        REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]')
+        REGISTRY_NAME_UPPER=$(printf '%s' "$REGISTRY_NAME" | tr '[:lower:]-' '[:upper:]_')
         echo "REGISTRY_NAME_UPPER: $REGISTRY_NAME_UPPER"
         export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
         export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
@@ -402,7 +402,7 @@ runs:
 
           # Try to publish, but don't fail if already published.
           set +e
-          PUBLISH_OUTPUT=$(cargo publish \
+          PUBLISH_OUTPUT=$(cargo publish --locked \
             --registry "$REGISTRY_NAME" \
             --package "$package" \
             --all-features \
