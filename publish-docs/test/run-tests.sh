@@ -206,4 +206,14 @@ assert "14.4 no staging dir leaked onto the docs tree" \
 assert "14.5 the same tree publishes cleanly with a working cp" \
   '"$SCRIPT" part 1.0.0 "$doc" >/dev/null && [ -f "$T/docs/part/1.0.0/part/poison.html" ]'
 
+# ---- Test 15: DOCS_ROOT has no default ----
+# A default would name a real host path; an unset or empty root must fail
+# before anything is written.
+T="$(mktemp -d)"; doc="$(make_doc nr)"
+assert "15.1 unset DOCS_ROOT fails" \
+  '(cd "$T" && ! env -u DOCS_ROOT "$SCRIPT" nr 1.0.0 "$doc" 2>/dev/null)'
+assert "15.2 empty DOCS_ROOT fails" \
+  '(cd "$T" && ! DOCS_ROOT= "$SCRIPT" nr 1.0.0 "$doc" 2>/dev/null)'
+assert "15.3 nothing written" '[ -z "$(ls -A "$T")" ]'
+
 echo; echo "PASS=$pass FAIL=$fail"; [ "$fail" -eq 0 ]
