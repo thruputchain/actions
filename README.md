@@ -65,37 +65,6 @@ Parses Cargo workspace version, validates all crates have matching versions, and
 
 See [cargo-version-tag/README.md](./cargo-version-tag/README.md) for detailed documentation.
 
-### cargo-nightly-version
-
-Computes a `<next-patch>-nightly.<date>.g<sha>` prerelease version and rewrites the workspace Cargo.toml in place (uncommitted). Used as the first step in a nightly release workflow.
-
-**Usage:**
-```yaml
-- uses: thruputchain/actions/cargo-nightly-version@main
-  with:
-    cargo-toml-path: './Cargo.toml'
-```
-
-**Outputs:** `version` (the computed nightly version string), `sha` (7-char git SHA used in the version).
-
-### cargo-publish-prerelease
-
-Publishes workspace crates to a cargo registry at their current Cargo.toml version, with no git-tag
-coupling. For **untagged** snapshots — nightlies whose version is synthesized at CI time by
-`cargo-nightly-version` and never committed, so there is no tag to validate against, and re-runs must
-tolerate an already-uploaded version. A tagged release candidate belongs in `cargo-publish`, which
-accepts pre-release tags and keeps the tag, version-match, dependency-pin and doc-build checks.
-
-**Usage:**
-```yaml
-- uses: thruputchain/actions/cargo-publish-prerelease@main
-  with:
-    registry-name: ${{ vars.CARGO_REGISTRY_NAME }}
-    registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-```
-
-**Outputs:** `published-version` (the version that was published).
-
 ### crates-io-publish
 
 Publishes a group of same-version crates to crates.io, and is safe to re-run. Crates that don't exist
