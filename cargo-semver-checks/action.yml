@@ -168,7 +168,7 @@ runs:
 
     - name: Install cargo-semver-checks
       if: steps.baseline.outputs.skipped != 'true' && steps.probe.outputs.needs-install == 'true'
-      uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+      uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
       with:
         tool: ${{ steps.probe.outputs.tool }}
 
