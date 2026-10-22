@@ -1,5 +1,5 @@
 name: 'Cargo Yank'
-description: 'Yanks (or un-yanks) a published version of workspace crates from a cargo registry. Registry configuration is read from .cargo/config.toml in the calling repository.'
+description: 'Yanks (or un-yanks) a published version of workspace crates from a cargo registry: crates.io, or a private registry configured in .cargo/config.toml in the calling repository.'
 author: 'Thruput Team'
 
 inputs:
@@ -11,10 +11,10 @@ inputs:
     required: false
     default: 'false'
   registry-name:
-    description: 'Name of the registry as defined in .cargo/config.toml'
+    description: 'Name of the registry as defined in .cargo/config.toml, or crates-io'
     required: true
   registry-token:
-    description: 'Authentication token for the cargo registry'
+    description: 'Authentication token for the cargo registry. For crates.io, an API token with the yank scope: trusted publishing tokens cannot yank.'
     required: true
   cargo-toml-path:
     description: 'Path to Cargo.toml file'
@@ -109,10 +109,16 @@ runs:
         set -euo pipefail
         source "$HOME/.cargo/env"
 
-        # Set registry token via environment variable
-        # The registry index is configured in .cargo/config.toml
-        REGISTRY_NAME_UPPER=$(echo "$REGISTRY_NAME" | tr '[:lower:]' '[:upper:]')
-        export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+        # Set registry token via environment variable. cargo reads crates.io's
+        # token from CARGO_REGISTRY_TOKEN, and any other registry's from
+        # CARGO_REGISTRIES_<NAME>_TOKEN, upper-cased, hyphens to underscores.
+        # A private registry's index is configured in .cargo/config.toml.
+        if [ "$REGISTRY_NAME" = "crates-io" ]; then
+          export "CARGO_REGISTRY_TOKEN=$REGISTRY_TOKEN"
+        else
+          REGISTRY_NAME_UPPER=$(printf '%s' "$REGISTRY_NAME" | tr '[:lower:]-' '[:upper:]_')
+          export "CARGO_REGISTRIES_${REGISTRY_NAME_UPPER}_TOKEN=$REGISTRY_TOKEN"
+        fi
         export "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS=cargo:token"
 
         # Explicitly mask the token in logs (GitHub Actions also auto-masks secrets, but this is extra safety)
