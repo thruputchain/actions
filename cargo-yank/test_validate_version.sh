@@ -25,7 +25,7 @@ check "zero version"                     accept "$(verdict 0.0.0)"
 check "rc pre-release"                   accept "$(verdict 0.15.1-rc.1)"
 check "single-identifier pre-release"    accept "$(verdict 1.0.0-beta)"
 check "dotted pre-release"               accept "$(verdict 1.0.0-alpha.1)"
-# The shape cargo-nightly-version emits.
+# A dated pre-release suffix.
 check "nightly pre-release"              accept "$(verdict 0.15.2-nightly.20260905.gabc1234)"
 
 # ---- Rejected: malformed versions ----

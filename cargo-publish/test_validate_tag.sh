@@ -24,7 +24,7 @@ check "stable with crate-scoped prefix"  accept "$(verdict groundhog-erc20-if-v0
 check "rc pre-release"                   accept "$(verdict v0.15.1-rc.1 v)"
 check "single-identifier pre-release"    accept "$(verdict v1.0.0-beta v)"
 check "dotted pre-release"               accept "$(verdict v1.0.0-alpha.1 v)"
-# The shape cargo-nightly-version emits.
+# A dated pre-release suffix.
 check "nightly pre-release"              accept "$(verdict v0.15.2-nightly.20260905.gabc1234 v)"
 check "pre-release with empty prefix"    accept "$(verdict 0.15.1-rc.1 '')"
 check "pre-release, scoped prefix"       accept "$(verdict groundhog-erc20-if-v0.1.23-rc.2 groundhog-erc20-if-v)"
