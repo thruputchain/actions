@@ -22,8 +22,8 @@ jobs:
     with:
       shellcheck-scripts: true
 
-  dry-run-registry:
-    name: Dry-run registry selection
+  action-steps:
+    name: Action steps run from action.yml
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -41,6 +41,11 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
         run: |
           "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish-dry-run/test_registry.py
+      - name: Test cargo-publish validation steps offline
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish/test_action_steps.py
       - name: Test release-tag registry resolution offline
         env:
           RUSTUP_TOOLCHAIN: stable

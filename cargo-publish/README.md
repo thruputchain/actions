@@ -77,6 +77,14 @@ The action performs these validations (only on packages that will be published):
 
 Documentation builds are checked by `cargo-publish-dry-run`, which should run before this action.
 
+Steps 2, 3 and 6, plus prefix stripping and package selection, are covered by
+`test_action_steps.py`, which runs them straight from `action.yml` against fixture workspaces
+(needs Python with PyYAML, cargo, git and jq):
+
+```bash
+python3 cargo-publish/test_action_steps.py
+```
+
 ## Publishing
 
 The action:
