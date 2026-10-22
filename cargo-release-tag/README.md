@@ -17,7 +17,9 @@ mistake, or for crates that deliberately don't bump every release. The naive
   release without anyone noticing.
 
 This action distinguishes the cases explicitly, consulting the registry when
-git alone cannot tell them apart.
+git alone cannot tell them apart. Each package is checked in the registry it
+publishes to, as its `publish` field says: crates.io when the field is unset
+or `["crates-io"]`, otherwise the named registry.
 
 ## Behavior
 
@@ -62,7 +64,8 @@ Independently-versioned crate that doesn't bump every release:
     tag-prefix: 'my-crate-v'
     github-token: ${{ github.token }}
     on-existing-tag: 'skip-if-published'
-    registry-name: groundhog
+    # Only for a private registry, whose index needs auth. crates.io needs
+    # nothing: the crate's `publish` field already says where to look.
     registry-token: ${{ secrets.REGISTRY_TOKEN }}
 
 - name: Publish my-crate
@@ -84,8 +87,8 @@ Independently-versioned crate that doesn't bump every release:
 | `tag-prefix` | Prefix for the git tag | No | `v` |
 | `github-token` | Token used to push the tag | Yes | |
 | `on-existing-tag` | `fail` or `skip-if-published` (see Behavior) | No | `fail` |
-| `registry-name` | Registry name from `.cargo/config.toml` (sparse index); required for `skip-if-published` | No | |
-| `registry-token` | Registry token, sent verbatim in `Authorization` for the index probe, exactly as cargo sends it; required for `skip-if-published` | No | |
+| `registry-name` | Under `skip-if-published`, the registry to check for packages whose `publish` field allows several (or, unset, any); otherwise the field decides | No | |
+| `registry-token` | Token for a private registry's index probe, sent verbatim in `Authorization` exactly as cargo sends it; not used for crates.io | No | |
 
 ## Outputs
 
@@ -99,8 +102,10 @@ Independently-versioned crate that doesn't bump every release:
 
 - Rust toolchain, `jq`, and `curl` on the runner
 - Repository checked out at the commit to release, run from the repo root
-- The registry defined as an inline `name = { index = "sparse+https://..." }`
-  entry in `.cargo/config.toml` (for `skip-if-published`)
+- For `skip-if-published` with a private registry: its sparse index in
+  `CARGO_REGISTRIES_<NAME>_INDEX` or as an inline
+  `name = { index = "sparse+https://..." }` entry in `.cargo/config.toml`.
+  Run the resolver's tests with `bash cargo-release-tag/test_registry_index.sh`.
 
 The action reaches GitHub over HTTPS with `github-token` and leaves the local
 git configuration untouched, so `origin` keeps the credentials
