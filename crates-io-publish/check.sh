@@ -46,7 +46,7 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
   packaged() { # packaged <checkout> <package> <dir>
     local target
     target=$(mktemp -d)
-    (cd "$1" && cargo package --quiet --no-verify --allow-dirty --exclude-lockfile \
+    (cd "$1" && cargo package --quiet --locked --no-verify --allow-dirty --exclude-lockfile \
       -p "$2" --target-dir "$target")
     mkdir -p "$3"
     tar -xzf "$target/package/$2-$VERSION.crate" -C "$3" --strip-components=1
