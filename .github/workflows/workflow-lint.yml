@@ -15,10 +15,29 @@ on:
   workflow_call:
     inputs:
       lint-app-id:
-        description: "Optional Thruput App ID for private Actions audits."
+        description: >-
+          Optional GitHub App ID. When set, zizmor's online audits run with an
+          installation token from this App (Contents: read on
+          lint-app-repositories), so they can read a private repository that
+          this caller's workflows reference.
         type: string
         required: false
         default: ""
+      lint-app-owner:
+        description: >-
+          Owner of the repositories the App token covers. Defaults to the
+          calling repository's owner.
+        type: string
+        required: false
+        default: ""
+      lint-app-repositories:
+        description: >-
+          Comma- or newline-separated repositories (under lint-app-owner) the
+          App token can read: the private repositories referenced by the
+          caller's `uses:` lines.
+        type: string
+        required: false
+        default: "actions"
       runs-on:
         description: "Runner label. Must be Linux x86-64."
         type: string
@@ -184,14 +203,15 @@ jobs:
         with:
           app-id: ${{ inputs.lint-app-id }}
           private-key: ${{ secrets.lint-app-private-key }}
-          owner: thruputchain
-          repositories: actions
+          owner: ${{ inputs.lint-app-owner || github.repository_owner }}
+          repositories: ${{ inputs.lint-app-repositories }}
           permission-contents: read
 
       - name: Lint
         env:
-          # The App token reads only thruputchain/actions and is revoked
-          # by the token action after the job. Other callers retain their token.
+          # The App token reads only lint-app-repositories and is revoked by
+          # the token action after the job. Callers without an App keep
+          # github.token.
           GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
           ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
           RUN_ZIZMOR: ${{ inputs.run-zizmor }}
@@ -232,8 +252,9 @@ jobs:
 
           # zizmor gets explicit paths, not a directory to walk: a walk
           # honours .gitignore and, unlike git, does not exempt tracked
-          # files -- and two of our repos ignore a bare `actions/`, which
-          # matches `.github/actions/` at any depth. Discovery is git
+          # files -- and a repo that ignores a bare `actions/` (which
+          # matches `.github/actions/` at any depth) would hide its local
+          # action definitions. Discovery is git
           # ls-files so definitions are found wherever they live, in either
           # spelling.
           zizmor_inputs=(.github/workflows/)

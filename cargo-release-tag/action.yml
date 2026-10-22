@@ -149,19 +149,30 @@ runs:
         git tag -f "$TAG"
 
         # Address the remote by URL rather than repointing `origin` at it.
-        # Callers set `url."git@github.com:".insteadOf "https://github.com/"`
-        # so cargo can reach private git deps, and `git remote get-url`
-        # returns the REWRITTEN url -- saving and restoring `origin` around
-        # the push therefore leaves it a bare SSH url that only the actions
-        # deploy key can use, in place of the credentialed HTTPS remote the
-        # checkout persisted, breaking later steps in the job. A url carrying
-        # userinfo is not matched by that insteadOf rule, so this one reaches
-        # GitHub over HTTPS whatever the caller configured.
-        REMOTE_URL="https://${GITHUB_ACTOR}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+        # A caller may set `url."git@github.com:".insteadOf "https://github.com/"`
+        # (e.g. so cargo can reach private git deps over SSH), and
+        # `git remote get-url` returns the REWRITTEN url -- saving and
+        # restoring `origin` around the push would therefore leave it a bare
+        # SSH url, in place of the credentialed HTTPS remote the checkout
+        # persisted, breaking later steps in the job. A url carrying userinfo
+        # is not matched by such an insteadOf rule, so this one reaches the
+        # server over HTTPS whatever the caller configured.
+        #
+        # The token itself stays out of the url (and so out of every process's
+        # argv): a one-shot credential helper reads it from the environment.
+        # GITHUB_SERVER_URL keeps this working on GitHub Enterprise Server.
+        REMOTE_URL="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}.git"
+        REMOTE_URL="${REMOTE_URL/:\/\//://x-access-token@}"
+        remote_git() {
+          GIT_TERMINAL_PROMPT=0 git \
+            -c credential.helper= \
+            -c 'credential.helper=!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' \
+            "$@"
+        }
 
         # Pushing a tag that already exists at the same commit is a no-op
         # success, so a re-run of a release commit sails through here.
-        if git push "$REMOTE_URL" "$TAG"; then
+        if remote_git push "$REMOTE_URL" "$TAG"; then
           echo "OK: tag $TAG is on this commit and pushed"
           echo "released=true" >> "$GITHUB_OUTPUT"
           exit 0
@@ -170,7 +181,7 @@ runs:
         # For an annotated tag the plain ref holds the tag OBJECT's SHA; the
         # peeled `^{}` entry holds the commit it targets, which is what HEAD
         # must be compared against. Lightweight tags have no peeled entry.
-        LS=$(git ls-remote --tags "$REMOTE_URL" "refs/tags/$TAG" "refs/tags/$TAG^{}")
+        LS=$(remote_git ls-remote --tags "$REMOTE_URL" "refs/tags/$TAG" "refs/tags/$TAG^{}")
         PEELED_SHA=$(grep '\^{}$' <<<"$LS" | cut -f1 | head -1 || true)
         DIRECT_SHA=$(grep -v '\^{}$' <<<"$LS" | cut -f1 | head -1 || true)
         REMOTE_SHA="${PEELED_SHA:-$DIRECT_SHA}"

@@ -105,6 +105,7 @@ runs:
         REGISTRY_TOKEN: ${{ inputs.registry-token }}
         CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
         PACKAGES: ${{ steps.list-packages.outputs.packages }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         source "$HOME/.cargo/env"
@@ -169,7 +170,9 @@ runs:
             echo "OK: $OPERATION_TITLE succeeded for $package version $VERSION"
             YANKED_COUNT=$((YANKED_COUNT + 1))
           else
-            if echo "$YANK_OUTPUT" | grep -qi "does not exist\|not found\|could not find\|has not been published"; then
+            # Skip only when the registry itself answered that the crate or
+            # version is unknown; see registry-missing.sh.
+            if bash "$ACTION_PATH/registry-missing.sh" <<<"$YANK_OUTPUT"; then
               echo "SKIP: $package version $VERSION not found in registry"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
             else
@@ -184,6 +187,13 @@ runs:
         echo "=== $OPERATION_TITLE Summary ==="
         echo "Succeeded: $YANKED_COUNT package(s)"
         echo "Skipped: $SKIPPED_COUNT package(s)"
+
+        # Nothing yanked is never a success: a wrong version or registry
+        # would otherwise leave the release in place behind a green job.
+        if [ "$YANKED_COUNT" -eq 0 ]; then
+          echo "::error::No package was ${OPERATION}ed: version $VERSION was not found for any package in registry $REGISTRY_NAME"
+          exit 1
+        fi
         echo "=== $OPERATION_TITLE Complete ==="
 
 branding:
