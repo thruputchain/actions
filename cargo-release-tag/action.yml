@@ -93,7 +93,7 @@ runs:
 
           ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
           for package in $PACKAGES_TO_CHECK; do
-            if ! echo "$ALL_PACKAGES" | grep -q "^${package}$"; then
+            if ! grep -qxF -- "$package" <<<"$ALL_PACKAGES"; then
               echo "::error::Package '$package' not found in workspace"
               exit 1
             fi
@@ -171,8 +171,10 @@ runs:
         }
 
         # Pushing a tag that already exists at the same commit is a no-op
-        # success, so a re-run of a release commit sails through here.
-        if remote_git push "$REMOTE_URL" "$TAG"; then
+        # success, so a re-run of a release commit sails through here. The
+        # full refspec keeps a branch of the same name from being pushed
+        # instead.
+        if remote_git push "$REMOTE_URL" "refs/tags/$TAG:refs/tags/$TAG"; then
           echo "OK: tag $TAG is on this commit and pushed"
           echo "released=true" >> "$GITHUB_OUTPUT"
           exit 0
@@ -225,21 +227,30 @@ runs:
           esac
         }
 
+        if [ -n "$REGISTRY_TOKEN" ]; then
+          echo "::add-mask::$REGISTRY_TOKEN"
+        fi
+        # The token travels in a header file read through a file descriptor,
+        # never in curl's argv, where any process on the runner could read it.
+        probe() { # probe <registry> <url> -> writes the body to ENTRY_FILE, prints the HTTP status
+          # crates.io's index is public; a private registry gets the token.
+          if [ "$1" != crates-io ] && [ -n "$REGISTRY_TOKEN" ]; then
+            curl -sS -o "$ENTRY_FILE" -w '%{http_code}' \
+              -H @<(printf 'Authorization: %s\n' "$REGISTRY_TOKEN") "$2"
+          else
+            curl -sS -o "$ENTRY_FILE" -w '%{http_code}' "$2"
+          fi
+        }
+
         ENTRY_FILE=$(mktemp)
         for pkg in $PACKAGES; do
           RESOLVED=$(bash "$ACTION_PATH/registry-index.sh" "$CARGO_TOML_PATH" "$pkg" "$REGISTRY_NAME")
           read -r REGISTRY INDEX_URL <<<"$RESOLVED"
-          # crates.io's index is public; a private registry gets the token.
-          AUTH=()
-          if [ "$REGISTRY" != crates-io ] && [ -n "$REGISTRY_TOKEN" ]; then
-            AUTH=(-H "Authorization: ${REGISTRY_TOKEN}")
-          fi
           # 404/410/451 mean the crate has no published versions at all (per
           # the registry index protocol) — that still lands in the
           # unpublished-version diagnostic below, not a raw HTTP error. Any
           # other failure is a real probe problem and fails closed.
-          HTTP_CODE=$(curl -sS -o "$ENTRY_FILE" -w '%{http_code}' "${AUTH[@]}" \
-            "${INDEX_URL}$(index_path "$pkg")")
+          HTTP_CODE=$(probe "$REGISTRY" "${INDEX_URL}$(index_path "$pkg")")
           case "$HTTP_CODE" in
             200) PUBLISHED=$(jq -r '.vers' "$ENTRY_FILE") ;;
             404|410|451) PUBLISHED="" ;;

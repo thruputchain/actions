@@ -23,6 +23,8 @@ jobs:
       shellcheck-scripts: true
 
   dry-run-registry:
+    # Branch protection requires a check with this name; keep it when
+    # adding steps here.
     name: Dry-run registry selection
     runs-on: ubuntu-latest
     permissions:
@@ -41,6 +43,11 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
         run: |
           "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish-dry-run/test_registry.py
+      - name: Test cargo-publish validation steps offline
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish/test_action_steps.py
       - name: Test release-tag registry resolution offline
         env:
           RUSTUP_TOOLCHAIN: stable

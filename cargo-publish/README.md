@@ -22,7 +22,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: thruputchain/actions/cargo-publish@v1
+      - uses: thruputchain/actions/cargo-publish@<commit-sha>
         with:
           git-tag: ${{ github.ref_name }}
           registry-name: ${{ vars.CARGO_REGISTRY_NAME }}
@@ -39,6 +39,8 @@ jobs:
 | `registry-token` | Authentication token (pass from secrets) | Yes | - |
 | `cargo-toml-path` | Path to Cargo.toml file | No | `./Cargo.toml` |
 | `packages` | Space-separated list of package names to publish. If not provided, all workspace packages will be processed. | No | - |
+| `publish-delay-seconds` | Seconds to wait after each successful publish so the registry can propagate before the next crate resolves against it | No | `30` |
+| `no-verify` | Pass `--no-verify` to `cargo publish`, skipping the publish-time verify build. Use when `cargo-publish-dry-run` already verified the crates; required for architecture-only crates that cannot build on the host | No | `false` |
 
 ## Outputs
 
@@ -68,10 +70,20 @@ The action performs these validations (only on packages that will be published):
 3. **Current commit**: Ensures HEAD is tagged with the specified tag
 4. **Cargo.toml exists**: Checks the file exists at the specified path
 5. **Version match**: Git tag version must exactly match Cargo.toml version for selected packages
-6. **Dependency versions**: Workspace internal dependencies must match the tag version
+6. **Dependency versions**: Workspace internal dependencies must match the tag version. A requirement
+   with a pre-release suffix (`=0.15.1-rc.1`) is checked like any other; only wildcards and
+   requirements that are not a single `X.Y.Z` (`0.15`, `>=0.15, <0.16`) are passed through
 7. **Required metadata**: License, description, and repository fields must be present
 
 Documentation builds are checked by `cargo-publish-dry-run`, which should run before this action.
+
+Steps 2, 3 and 6, plus prefix stripping and package selection, are covered by
+`test_action_steps.py`, which runs them straight from `action.yml` against fixture workspaces
+(needs Python with PyYAML, cargo, git and jq):
+
+```bash
+python3 cargo-publish/test_action_steps.py
+```
 
 ## Publishing
 
@@ -85,7 +97,7 @@ The action:
 ## Example with Output
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish@v1
+- uses: thruputchain/actions/cargo-publish@<commit-sha>
   id: publish
   with:
     git-tag: ${{ github.ref_name }}
@@ -102,7 +114,7 @@ The action:
 To publish only selected packages from a workspace:
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish@v1
+- uses: thruputchain/actions/cargo-publish@<commit-sha>
   with:
     git-tag: ${{ github.ref_name }}
     registry-name: ${{ vars.CARGO_REGISTRY_NAME }}
@@ -118,7 +130,7 @@ To use a different tag prefix (or no prefix):
 
 ```yaml
 # Using 'release-' prefix (e.g., release-1.2.3)
-- uses: thruputchain/actions/cargo-publish@v1
+- uses: thruputchain/actions/cargo-publish@<commit-sha>
   with:
     git-tag: ${{ github.ref_name }}
     tag-prefix: 'release-'
@@ -126,7 +138,7 @@ To use a different tag prefix (or no prefix):
     registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
 # Using no prefix (e.g., 1.2.3)
-- uses: thruputchain/actions/cargo-publish@v1
+- uses: thruputchain/actions/cargo-publish@<commit-sha>
   with:
     git-tag: ${{ github.ref_name }}
     tag-prefix: ''

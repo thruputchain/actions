@@ -33,7 +33,7 @@ jobs:
         with:
           tool: cargo-hack
 
-      - uses: thruputchain/actions/cargo-publish-dry-run@v1
+      - uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
         with:
           cargo-toml-path: './Cargo.toml'
 ```
@@ -87,18 +87,21 @@ Tests are not run.
 ## Example: Minimal Configuration
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
 ```
 
 ## Example: A Different Private Registry
 
+The default registry name is `thruput`. To validate against another one:
+
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
   with:
-    registry-name: thruput
+    registry-name: other-registry
 ```
 
-Configure that registry and its source in `.cargo/config.toml`. Provide its
+Configure that registry and its source in `.cargo/config.toml`; cargo rejects a source override
+for a registry that is not defined there. Provide its
 credentials through the normal Cargo environment when dependency acquisition
 requires authentication. The action replaces that source with `vendor/` for
 packaging, verification, clippy, and documentation checks.
@@ -106,7 +109,7 @@ packaging, verification, clippy, and documentation checks.
 ## Example: Custom Feature Testing
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
   with:
     cargo-hack-feature-options: '--feature-powerset --exclude-no-default-features'
 ```
@@ -114,7 +117,7 @@ packaging, verification, clippy, and documentation checks.
 ## Example: Skip Optional Checks
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
   with:
     skip-fmt: true
     skip-clippy: true
@@ -125,7 +128,7 @@ packaging, verification, clippy, and documentation checks.
 To validate only selected packages from a workspace:
 
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
   with:
     packages: 'package1 package2 package3'
 ```
@@ -156,7 +159,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: thruputchain/actions/cargo-publish-dry-run@v1
+      - uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
 
   publish:
     needs: validate
@@ -168,7 +171,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: thruputchain/actions/cargo-publish@v1
+      - uses: thruputchain/actions/cargo-publish@<commit-sha>
         with:
           git-tag: ${{ github.ref_name }}
           registry-name: ${{ vars.CARGO_REGISTRY_NAME }}

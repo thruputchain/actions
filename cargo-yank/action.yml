@@ -72,7 +72,7 @@ runs:
 
           VALIDATION_FAILED=0
           for package in $PACKAGES; do
-            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+            if ! grep -qxF -- "$package" <<<"$WORKSPACE_PACKAGES"; then
               echo "::error::Package '$package' not found in workspace"
               VALIDATION_FAILED=1
             fi

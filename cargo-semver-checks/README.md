@@ -32,7 +32,7 @@ pull request is checked against the last release of its own branch history.
 ### Basic Usage
 
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@main
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 ```
@@ -44,7 +44,7 @@ repo change. Pin the Rust toolchain too (via `rust-toolchain.toml` or the
 workflow), since the rustdoc JSON format the tool reads comes from it.
 
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@main
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     semver-checks-version: '0.50.0'
     registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -53,7 +53,7 @@ workflow), since the rustdoc JSON format the tool reads comes from it.
 ### Check specific packages
 
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@main
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     packages: 'thruput-xdr thruput-syscall'
 ```
@@ -61,13 +61,13 @@ workflow), since the rustdoc JSON format the tool reads comes from it.
 ### Compare against an explicit baseline
 
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@main
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     baseline-rev: 'v0.25.0'
 ```
 
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@main
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     baseline-version: '0.25.0'
 ```
@@ -94,7 +94,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: thruputchain/actions/cargo-semver-checks@main
+      - uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
         with:
           exclude: 'some-internal-crate'
           semver-checks-version: '0.50.0'
