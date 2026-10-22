@@ -70,7 +70,8 @@ The action performs these validations (only on packages that will be published):
 5. **Version match**: Git tag version must exactly match Cargo.toml version for selected packages
 6. **Dependency versions**: Workspace internal dependencies must match the tag version
 7. **Required metadata**: License, description, and repository fields must be present
-8. **Documentation**: Documentation must build successfully
+
+Documentation builds are checked by `cargo-publish-dry-run`, which should run before this action.
 
 ## Publishing
 

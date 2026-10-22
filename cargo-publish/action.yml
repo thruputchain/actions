@@ -31,9 +31,6 @@ inputs:
     description: 'Pass --no-verify to cargo publish (skip the publish-time verify build). Use when verification is already done by a prior dry-run job; required for architecture-only crates that cannot build on the host.'
     required: false
     default: 'false'
-  arch-only-packages:
-    description: 'Space-separated list of packages that can only build for a non-host target (e.g. wasm32/riscv32 runtimes). They are skipped in the host documentation validation; their builds are covered by the dry-run job''s per-target verify.'
-    required: false
 
 outputs:
   published-version:
@@ -335,58 +332,6 @@ runs:
         fi
 
         echo "OK: All publishable packages have required metadata!"
-
-    # Redundant with cargo-publish-dry-run
-    - name: Validate documentation builds
-      shell: bash
-      env:
-        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
-        PACKAGES: ${{ steps.list-packages.outputs.packages }}
-        ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
-      run: |
-        set -euo pipefail
-        source "$HOME/.cargo/env"
-
-        echo "Validating documentation builds..."
-
-        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --no-deps --format-version 1)
-        DOC_BUILD_FAILED=0
-
-        for package in $PACKAGES; do
-          # Architecture-only crates can't build for the host (their deps are
-          # target-gated); the dry-run job's per-target verify covers them.
-          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
-            echo "SKIP: Package $package is architecture-only, skipping host documentation build"
-            continue
-          fi
-
-          # Check if package has publish=false (appears as empty array [] in cargo metadata)
-          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
-            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
-
-          if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
-            echo "SKIP: Package $package has publish=false, skipping documentation build"
-            continue
-          fi
-
-          echo "Building documentation for $package..."
-          if ! cargo doc --manifest-path "$CARGO_TOML_PATH" --package "$package" --no-deps --all-features 2>&1; then
-            echo "::error::DOCUMENTATION BUILD FAILED for package '$package'!"
-            DOC_BUILD_FAILED=1
-          else
-            echo "OK: Documentation built successfully for $package"
-          fi
-        done
-
-        if [ $DOC_BUILD_FAILED -eq 1 ]; then
-          echo "::error::DOCUMENTATION BUILD FAILED!"
-          echo "::error::"
-          echo "::error::The documentation failed to build for one or more packages."
-          echo "::error::Please fix any documentation errors and ensure 'cargo doc' succeeds."
-          exit 1
-        fi
-
-        echo "OK: Documentation builds successfully for all publishable packages!"
 
     - name: Publish to registry
       shell: bash
