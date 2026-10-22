@@ -41,3 +41,22 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
         run: |
           "$RUNNER_TEMP/registry-tests-env/bin/python" cargo-publish-dry-run/test_registry.py
+      - name: Test release-tag registry resolution offline
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: bash cargo-release-tag/test_registry_index.sh
+
+  crates-io-publish:
+    name: crates-io-publish against a mock crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Test check and publish modes offline
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: bash crates-io-publish/test_crates_io_publish.sh

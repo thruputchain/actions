@@ -22,18 +22,20 @@ inputs:
       What to do when the remote tag already exists at a different commit.
       "fail" (default): error out — the caller expects every run to be a new
       release or a re-run of the tagged commit. "skip-if-published": consult
-      the registry; if the version is already published set released=false
-      (an unchanged crate), and fail only when it is not published — that is
+      the registry each package publishes to (its `publish` field; unset
+      means crates.io); if the version is already published set
+      released=false (an unchanged crate), and fail only when it is not
+      published — that is
       a half-completed release, and publishing HEAD would ship content that
       does not match the tag.
     required: false
     default: 'fail'
   registry-name:
-    description: 'Registry name as defined in .cargo/config.toml. Required for on-existing-tag: skip-if-published.'
+    description: 'Registry to check under skip-if-published when a package may publish to several (or, with `publish` unset, any). Otherwise each package''s `publish` field names it.'
     required: false
     default: ''
   registry-token:
-    description: 'Registry auth token, sent verbatim in the Authorization header for the index probe (exactly as cargo sends it). Required for on-existing-tag: skip-if-published.'
+    description: 'Auth token for a private registry''s index probe under skip-if-published, sent verbatim in the Authorization header (exactly as cargo sends it). Not used for crates.io.'
     required: false
     default: ''
 
@@ -132,6 +134,8 @@ runs:
         TAG_PREFIX: ${{ inputs.tag-prefix }}
         MODE: ${{ inputs.on-existing-tag }}
         GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_PATH: ${{ github.action_path }}
+        CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
         REGISTRY_NAME: ${{ inputs.registry-name }}
         REGISTRY_TOKEN: ${{ inputs.registry-token }}
       run: |
@@ -190,24 +194,14 @@ runs:
           exit 1
         fi
 
-        if [ -z "$REGISTRY_NAME" ] || [ -z "$REGISTRY_TOKEN" ]; then
-          echo "::error::on-existing-tag: skip-if-published requires registry-name and registry-token"
-          exit 1
-        fi
-
         # The tag belongs to another commit. That is fine iff the version is
         # already published (the crate simply wasn't bumped for this
         # release); if it is NOT published, a previous run died between tag
         # push and publish (or a stray tag was pushed by hand), and
         # publishing HEAD would ship content that does not match the tag.
-        # The probe fails closed: an unreachable registry stops the release
-        # rather than guessing.
-        INDEX_URL=$(sed -n "s/^${REGISTRY_NAME} *= *{ *index *= *\"sparse+\([^\"]*\)\".*/\1/p" .cargo/config.toml | head -1)
-        if [ -z "$INDEX_URL" ]; then
-          echo "::error::Could not find a sparse index for registry '$REGISTRY_NAME' in .cargo/config.toml"
-          exit 1
-        fi
-        INDEX_URL="${INDEX_URL%/}/"
+        # Each package is checked in the registry it publishes to. The probe
+        # fails closed: an unreachable registry stops the release rather
+        # than guessing.
 
         index_path() {
           local name
@@ -222,27 +216,33 @@ runs:
 
         ENTRY_FILE=$(mktemp)
         for pkg in $PACKAGES; do
+          RESOLVED=$(bash "$ACTION_PATH/registry-index.sh" "$CARGO_TOML_PATH" "$pkg" "$REGISTRY_NAME")
+          read -r REGISTRY INDEX_URL <<<"$RESOLVED"
+          # crates.io's index is public; a private registry gets the token.
+          AUTH=()
+          if [ "$REGISTRY" != crates-io ] && [ -n "$REGISTRY_TOKEN" ]; then
+            AUTH=(-H "Authorization: ${REGISTRY_TOKEN}")
+          fi
           # 404/410/451 mean the crate has no published versions at all (per
           # the registry index protocol) — that still lands in the
           # unpublished-version diagnostic below, not a raw HTTP error. Any
           # other failure is a real probe problem and fails closed.
-          HTTP_CODE=$(curl -sS -o "$ENTRY_FILE" -w '%{http_code}' \
-            -H "Authorization: ${REGISTRY_TOKEN}" \
+          HTTP_CODE=$(curl -sS -o "$ENTRY_FILE" -w '%{http_code}' "${AUTH[@]}" \
             "${INDEX_URL}$(index_path "$pkg")")
           case "$HTTP_CODE" in
             200) PUBLISHED=$(jq -r '.vers' "$ENTRY_FILE") ;;
             404|410|451) PUBLISHED="" ;;
             *)
-              echo "::error::Registry probe for '$pkg' failed (HTTP $HTTP_CODE); cannot tell whether ${pkg}@${VERSION} is published"
+              echo "::error::Probe of $REGISTRY for '$pkg' failed (HTTP $HTTP_CODE); cannot tell whether ${pkg}@${VERSION} is published"
               exit 1
               ;;
           esac
           if ! grep -qx "$VERSION" <<<"$PUBLISHED"; then
-            echo "::error::Tag $TAG points at $REMOTE_SHA (not this commit) but ${pkg}@${VERSION} is not in the registry."
+            echo "::error::Tag $TAG points at $REMOTE_SHA (not this commit) but ${pkg}@${VERSION} is not in $REGISTRY."
             echo "::error::A previous release likely died between tag push and publish. Re-run from the tagged commit, or delete the stale tag; publishing from this commit would ship content that does not match the tag."
             exit 1
           fi
-          echo "OK: ${pkg}@${VERSION} is already published"
+          echo "OK: ${pkg}@${VERSION} is already published to $REGISTRY"
         done
 
         echo "::notice::Tag $TAG already exists at $REMOTE_SHA and version $VERSION is published; this commit does not release it"

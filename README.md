@@ -96,6 +96,44 @@ accepts pre-release tags and keeps the tag, version-match, dependency-pin and do
 
 **Outputs:** `published-version` (the version that was published).
 
+### crates-io-publish
+
+Publishes a group of same-version crates to crates.io, and is safe to re-run. Crates that don't exist
+yet are created with a bootstrap token, which also registers the calling workflow as their trusted
+publisher. New versions of existing crates publish through trusted publishing (GitHub OIDC), with no
+stored token. Versions already published are skipped.
+
+It runs in two modes around `cargo-release-tag`: `check` decides whether this commit releases the
+group and verifies everything publishing would reject, before anything is tagged; `publish` then
+publishes from the tagged commit.
+
+**Usage:**
+```yaml
+- id: check
+  uses: thruputchain/actions/crates-io-publish@v1
+  with:
+    mode: check
+    packages: my-crate-macros my-crate
+    bootstrap-token: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+- id: tag
+  if: steps.check.outputs.release == 'true'
+  uses: thruputchain/actions/cargo-release-tag@v1
+  with:
+    packages: my-crate-macros my-crate
+    github-token: ${{ github.token }}
+- if: steps.check.outputs.release == 'true'
+  uses: thruputchain/actions/crates-io-publish@v1
+  with:
+    mode: publish
+    packages: my-crate-macros my-crate
+    git-tag: ${{ steps.tag.outputs.tag }}
+    bootstrap-token: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+```
+
+The job needs `permissions: { contents: write, id-token: write }`.
+
+See [crates-io-publish/README.md](./crates-io-publish/README.md) for a full release workflow.
+
 ### semver.sh
 
 Not an action: the single definition of the semver grammar the publish and yank actions accept
