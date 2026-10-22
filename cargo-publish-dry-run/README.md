@@ -1,6 +1,10 @@
 # Cargo Publish Dry Run Action
 
-A GitHub composite action that validates Rust crates before publishing by vendoring dependencies, building, testing, and packaging.
+A GitHub composite action that validates Rust crates before publishing: it vendors dependencies, then
+packages each crate and build-verifies every feature combination offline, exactly as a consumer would
+build the published `.crate`.
+
+It does **not** run your tests. Keep a separate test job if tests should gate a release.
 
 ## Usage
 
@@ -25,6 +29,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
       - uses: thruputchain/actions/cargo-publish-dry-run@v1
         with:
           cargo-toml-path: './Cargo.toml'
@@ -37,8 +45,13 @@ jobs:
 | `registry-name` | Private registry name in `.cargo/config.toml` | No | `thruput` |
 | `cargo-toml-path` | Path to Cargo.toml file | No | `./Cargo.toml` |
 | `packages` | Space-separated list of package names to validate. If not provided, all workspace packages will be processed. | No | - |
-| `cargo-hack-feature-options` | Feature testing options for cargo-hack | No | `--feature-powerset` |
-| `skip-tests` | Skip running tests | No | `false` |
+| `cargo-hack-feature-options` | Feature options for cargo-hack on the host | No | `--feature-powerset` |
+| `cargo-hack-wasm32-packages` | Space-separated packages to also verify for `wasm32-unknown-unknown`. Step skipped if empty. | No | `''` |
+| `cargo-hack-wasm32-feature-options` | Feature options for cargo-hack on `wasm32-unknown-unknown` | No | `--feature-powerset` |
+| `cargo-hack-rv32-packages` | Space-separated packages to also verify for `riscv32im-unknown-none-elf`. Step skipped if empty. | No | `''` |
+| `cargo-hack-rv32-feature-options` | Feature options for cargo-hack on `riscv32im-unknown-none-elf` | No | `--feature-powerset` |
+| `arch-only-packages` | Space-separated packages that only build for a non-host target. Still packaged, but skipped by the host verify, clippy, and doc steps; list them in a per-target input instead. | No | `''` |
+| `vendor-workspace-deps` | Space-separated workspace packages to package into `vendor/` first, without verifying or publishing them. Use when the validated packages depend on workspace crates that are already published. | No | `''` |
 | `skip-clippy` | Skip clippy checks | No | `false` |
 | `skip-fmt` | Skip formatting checks | No | `false` |
 
@@ -46,9 +59,11 @@ jobs:
 
 Your workflow must:
 1. Checkout the repository
-2. Install Rust toolchain with `rustfmt` and `clippy` components
-3. Have `jq` available (included in GitHub-hosted runners)
-4. Commit an up-to-date `Cargo.lock`: every cargo command that resolves dependencies runs with
+2. Install Rust toolchain with `rustfmt` and `clippy` components (plus the `wasm32-unknown-unknown` /
+   `riscv32im-unknown-none-elf` targets if you use the per-target inputs)
+3. Install [`cargo-hack`](https://github.com/taiki-e/cargo-hack), e.g. with `taiki-e/install-action`
+4. Have `jq` available (included in GitHub-hosted runners)
+5. Commit an up-to-date `Cargo.lock`: every cargo command that resolves dependencies runs with
    `--locked`, so the action builds exactly the committed lockfile and fails if it is missing or
    stale
 
@@ -57,13 +72,17 @@ Your workflow must:
 The action performs the following validations:
 
 1. **Vendor Dependencies**: Creates a `vendor/` directory with all dependencies to ensure reproducible builds
-2. **Build**: Compiles all workspace packages with all features enabled
-3. **Test**: Runs all tests (can be skipped with `skip-tests: true`)
-4. **Package**: Creates package archives for each crate (dry-run, doesn't publish)
-5. **Feature Verification**: Uses `cargo-hack` to verify all feature combinations
-6. **Format Check**: Validates code formatting (can be skipped with `skip-fmt: true`)
-7. **Clippy**: Runs linter checks with warnings as errors (can be skipped with `skip-clippy: true`)
+2. **Package**: Creates package archives for each crate and adds them to `vendor/`, so workspace crates
+   resolve against each other as published `.crate` files
+3. **Feature Verification**: Uses `cargo-hack ... package` to build each packaged crate offline under every
+   feature combination (and, if configured, for wasm32 / rv32)
+4. **Publish Dry Run**: Runs `cargo publish --dry-run` for each publishable crate
+5. **Format Check**: Validates code formatting (can be skipped with `skip-fmt: true`)
+6. **Clippy**: Runs linter checks with all features and warnings as errors (can be skipped with `skip-clippy: true`)
+7. **Metadata**: Requires `license`, `description`, and `repository` on every publishable crate
 8. **Documentation**: Verifies documentation builds successfully
+
+Tests are not run.
 
 ## Example: Minimal Configuration
 

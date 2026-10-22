@@ -1,5 +1,5 @@
 name: 'Cargo Publish Dry Run'
-description: 'Validates Rust crates by vendoring dependencies, building, testing, and packaging without publishing'
+description: 'Validates Rust crates by vendoring dependencies, then packaging and build-verifying every feature combination offline, without publishing'
 author: 'Thruput Team'
 
 inputs:
@@ -38,10 +38,6 @@ inputs:
     description: 'Space-separated list of packages that only build for a specific architecture (e.g. the wasm/rv32 runtimes). These are still vendored (and published by cargo-publish), but are skipped in the host verify step and validated only by the per-target verify steps.'
     required: false
     default: ''
-  skip-tests:
-    description: 'Skip running tests'
-    required: false
-    default: 'false'
   skip-clippy:
     description: 'Skip clippy checks'
     required: false

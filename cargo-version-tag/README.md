@@ -6,9 +6,12 @@ A GitHub Action that parses a Cargo workspace's `Cargo.toml`, validates that all
 
 - Extracts version from the workspace root `Cargo.toml`
 - Validates that ALL workspace crates share the same version
-- Creates a git tag in the format `vX.Y.Z` (configurable prefix)
-- Optionally pushes the tag to the remote repository
+- Creates a local git tag in the format `vX.Y.Z` (configurable prefix)
 - Configurable behavior for existing tags
+
+The tag is only created locally; this action never pushes it. Push it yourself
+once the release has succeeded, or use [`cargo-release-tag`](../cargo-release-tag/README.md),
+which tags and pushes in one step.
 
 ## Usage
 
@@ -20,14 +23,16 @@ A GitHub Action that parses a Cargo workspace's `Cargo.toml`, validates that all
     cargo-toml-path: './Cargo.toml'
 ```
 
-### With Tag Push
+### Selected Packages
 
 ```yaml
 - uses: thruputchain/actions/cargo-version-tag@v1
   with:
-    cargo-toml-path: './Cargo.toml'
-    push-tag: 'true'
+    packages: 'my-crate-core my-crate-utils'
 ```
+
+Only the listed packages must share a version, and the first one's version is
+used for the tag.
 
 ### Custom Tag Prefix
 
@@ -56,11 +61,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Create version tag
+        id: tag
         uses: thruputchain/actions/cargo-version-tag@v1
         with:
           cargo-toml-path: './Cargo.toml'
-          push-tag: 'true'
+
+      # ... publish ...
+
+      - name: Push tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: git push origin "refs/tags/$TAG"
 ```
+
+`actions/checkout` must leave credentials in place (its default) for that push,
+and the job needs `permissions: contents: write`.
 
 ## Inputs
 
@@ -68,7 +83,7 @@ jobs:
 |-------|-------------|----------|---------|
 | `cargo-toml-path` | Path to the workspace root Cargo.toml file | No | `./Cargo.toml` |
 | `tag-prefix` | Prefix for the git tag | No | `v` |
-| `push-tag` | Whether to push the tag to remote | No | `false` |
+| `packages` | Space-separated packages whose versions must match; the first one's version is used for the tag. All workspace packages if empty. | No | |
 | `fail-if-exists` | Fail if the tag already exists at a different commit (a tag already at `HEAD` always succeeds) | No | `true` |
 
 ## Outputs
@@ -122,7 +137,6 @@ ERROR: Tag v1.2.3 already exists at <tag-sha>, which is not this commit (<head-s
 
 - Rust toolchain must be installed (e.g., via `dtolnay/rust-toolchain@stable`)
 - Repository must be checked out (e.g., via `actions/checkout@v4`)
-- Git must be configured for tag creation and pushing
 
 ## License
 

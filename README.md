@@ -22,7 +22,8 @@ See [cargo-publish/README.md](./cargo-publish/README.md) for detailed documentat
 
 ### cargo-publish-dry-run
 
-Validates Rust crates before publishing by vendoring dependencies, building, testing, and packaging.
+Validates Rust crates before publishing by vendoring dependencies, then packaging and build-verifying
+every feature combination offline. It does not run tests.
 
 **Usage:**
 ```yaml
@@ -53,14 +54,14 @@ See [cargo-semver-checks/README.md](./cargo-semver-checks/README.md) for detaile
 
 ### cargo-version-tag
 
-Parses Cargo workspace version, validates all crates have matching versions, and creates a git tag.
+Parses Cargo workspace version, validates all crates have matching versions, and creates a local
+git tag (it does not push it).
 
 **Usage:**
 ```yaml
 - uses: thruputchain/actions/cargo-version-tag@v1
   with:
     cargo-toml-path: './Cargo.toml'
-    push-tag: 'true'
 ```
 
 See [cargo-version-tag/README.md](./cargo-version-tag/README.md) for detailed documentation.

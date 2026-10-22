@@ -169,7 +169,12 @@ runs:
             echo "OK: $OPERATION_TITLE succeeded for $package version $VERSION"
             YANKED_COUNT=$((YANKED_COUNT + 1))
           else
-            if echo "$YANK_OUTPUT" | grep -qi "does not exist\|not found\|could not find\|has not been published"; then
+            # Skip only when the registry itself answered that the crate or
+            # version is unknown. Cargo's own errors (an unconfigured
+            # registry: "registry index was not found", a missing token, a
+            # network failure) must fail the yank, not count as a skip.
+            if echo "$YANK_OUTPUT" | grep -qi "remote server responded with an error\|api errors" \
+              && echo "$YANK_OUTPUT" | grep -qi "status 404\|does not exist\|does not have a version\|has not been published"; then
               echo "SKIP: $package version $VERSION not found in registry"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
             else
@@ -184,6 +189,13 @@ runs:
         echo "=== $OPERATION_TITLE Summary ==="
         echo "Succeeded: $YANKED_COUNT package(s)"
         echo "Skipped: $SKIPPED_COUNT package(s)"
+
+        # Nothing yanked is never a success: a wrong version or registry
+        # would otherwise leave the release in place behind a green job.
+        if [ "$YANKED_COUNT" -eq 0 ]; then
+          echo "::error::No package was ${OPERATION}ed: version $VERSION was not found for any package in registry $REGISTRY_NAME"
+          exit 1
+        fi
         echo "=== $OPERATION_TITLE Complete ==="
 
 branding:
