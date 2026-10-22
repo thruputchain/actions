@@ -1,6 +1,6 @@
 name: 'Cargo Publish'
 description: 'Publishes Rust crates to a cargo registry with strict version validation. Registry configuration is read from .cargo/config.toml in the calling repository.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   git-tag:

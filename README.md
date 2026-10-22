@@ -1,4 +1,4 @@
-# Groundhog Chain GitHub Actions
+# Thruput GitHub Actions
 
 A collection of reusable GitHub Actions for the thruputchain organization.
 

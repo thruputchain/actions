@@ -1,6 +1,6 @@
 name: 'Cargo Release Tag'
 description: 'Tags HEAD with the crate version, pushes the tag, and decides whether this commit is the release commit for that version — refusing to proceed when the remote tag and the registry disagree.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   cargo-toml-path:

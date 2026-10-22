@@ -1,6 +1,6 @@
 name: 'Cargo Version Tag'
 description: 'Parses Cargo.toml, validates workspace crate versions match, and creates a git tag'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   cargo-toml-path:

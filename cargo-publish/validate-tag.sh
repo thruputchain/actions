@@ -13,11 +13,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAG="${1?git tag required}"
 PREFIX="${2-}"
 
-# Escape special regex characters in the prefix so a prefix like "groundhog-erc20-if-v"
+# Escape special regex characters in the prefix so a prefix like "thruput-erc20-if-v"
 # (or one containing '.') is matched literally.
 ESCAPED_PREFIX=$(printf '%s\n' "$PREFIX" | sed 's/[[\.*^$()+?{|]/\\&/g')
 
-SEMVER_REGEX="$(groundhog_semver_regex "$ESCAPED_PREFIX")"
+SEMVER_REGEX="$(thruput_semver_regex "$ESCAPED_PREFIX")"
 
 if [ -z "$PREFIX" ]; then
   EXPECTED_FORMAT="1.2.3 or 1.2.3-rc.1 (semver without prefix)"
