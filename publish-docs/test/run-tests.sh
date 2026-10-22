@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for publish-docs.sh. Runs everything against a temp DOCS_ROOT,
-# so it needs no privileges and never touches the real /home/hog12/www.
+# so it needs no privileges and never touches the real docs site.
 set -uo pipefail
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/publish-docs.sh"
@@ -34,14 +34,14 @@ make_full_doc() {
 
 # ---- Test 1: happy path ----
 T="$(mktemp -d)"; export DOCS_ROOT="$T/docs"
-doc="$(make_doc groundhog_gateway)"
-"$SCRIPT" groundhog-gateway 0.1.0 "$doc" >/dev/null
+doc="$(make_doc thruput_gateway)"
+"$SCRIPT" thruput-gateway 0.1.0 "$doc" >/dev/null
 assert "1.1 version dir + entry copied" \
-  '[ -f "$T/docs/groundhog-gateway/0.1.0/groundhog_gateway/index.html" ]'
+  '[ -f "$T/docs/thruput-gateway/0.1.0/thruput_gateway/index.html" ]'
 assert "1.2 redirect index points at lib entry" \
-  'grep -q "groundhog_gateway/index.html" "$T/docs/groundhog-gateway/0.1.0/index.html"'
+  'grep -q "thruput_gateway/index.html" "$T/docs/thruput-gateway/0.1.0/index.html"'
 assert "1.3 latest -> 0.1.0" \
-  '[ "$(readlink "$T/docs/groundhog-gateway/latest")" = "0.1.0" ]'
+  '[ "$(readlink "$T/docs/thruput-gateway/latest")" = "0.1.0" ]'
 
 # ---- Test 2: latest = newest stable by semver ----
 T="$(mktemp -d)"; export DOCS_ROOT="$T/docs"

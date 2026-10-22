@@ -3,9 +3,9 @@
 Installs a built `target/doc` tree into a versioned static docs site served by
 Caddy under `/docs/`.
 
-This replaces the broken kellnr doc-generation path. It is the **receive + serve**
-half: it takes an already-built `target/doc` and places it on the site. You still
-need a `cargo doc` step before it to produce `target/doc` (see *Generating docs*).
+It is the **receive + serve** half: it takes an already-built `target/doc` and
+places it on the site. You still need a `cargo doc` step before it to produce
+`target/doc` (see *Generating docs*).
 
 ## Layout produced
 
@@ -39,8 +39,9 @@ Versions are **immutable**: re-publishing an existing version fails unless
 - name: Publish docs
   uses: ./actions/publish-docs
   with:
-    crate: groundhog-gateway
+    crate: thruput-gateway
     version: ${{ steps.publish-tag.outputs.version }}
+    docs-root: ${{ vars.DOCS_ROOT }}
     # doc-dir defaults to ./target/doc
     # lib-name defaults to <crate> with '-' -> '_'
 ```
@@ -49,11 +50,11 @@ Versions are **immutable**: re-publishing an existing version fails unless
 
 | Input       | Required | Default                  | Notes |
 |-------------|----------|--------------------------|-------|
-| `crate`     | yes      | —                        | Crate name, e.g. `groundhog-gateway`. |
+| `crate`     | yes      | —                        | Crate name, e.g. `thruput-gateway`. |
 | `version`   | yes      | —                        | e.g. `0.16.2`; pre-releases contain a `-`. |
 | `doc-dir`   | no       | `./target/doc`           | The built rustdoc tree to publish. |
 | `lib-name`  | no       | `<crate>` with `-`→`_`   | rustdoc entry subdir; override if the lib name differs. |
-| `docs-root` | no       | `/home/hog12/www/docs`   | Base dir of the static site (must be writable by the runner). |
+| `docs-root` | yes      | —                        | Base dir of the static site (must be writable by the runner). |
 | `force`     | no       | `false`                  | Overwrite an already-published version. |
 | `shared-static` | no   | `true`                   | Serve rustdoc's asset bundle from one shared `_static/` dir. |
 | `publish-jobs`  | no   | `4`                      | Concurrent file copies into the docs tree; `1` is serial. |

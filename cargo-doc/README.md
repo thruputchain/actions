@@ -1,7 +1,7 @@
 # Cargo Doc Publish
 
 Builds rustdoc for each publishable workspace crate and uploads it to the
-versioned static docs site (served by Caddy at `groundhog.dev/docs`) via
+versioned static docs site (served by Caddy) via
 [`../publish-docs/publish-docs.sh`](../publish-docs/README.md).
 
 It mirrors **docs.rs**: each crate is built `--no-deps` (small, isolated), and
@@ -37,10 +37,10 @@ with the maps above, that link points at the dependency's hosted page.
 | `packages` | no | all | Space-separated; default is all workspace packages minus `publish=false` and `arch-only-packages`. |
 | `arch-only-packages` | no | — | Packages that only build for wasm/rv32; skipped (same as the dry-run host steps). |
 | `toolchain` | no | `nightly` | Nightly toolchain with cargo, e.g. `nightly-2026-01-30`. |
-| `registry-name` | no | `groundhog` | Private registry name from `.cargo/config.toml`; its deps map to `docs-base-url`. |
+| `registry-name` | no | `thruput` | Private registry name from `.cargo/config.toml`; its deps map to `docs-base-url`. |
 | `registry-token` | no | — | Token so the doc build can fetch private-registry deps. |
-| `docs-base-url` | no | `https://groundhog.dev/docs` | Public base URL used for cross-crate link rewriting. |
-| `docs-root` | no | `/home/hog12/www/docs` | Filesystem root of the docs site (runner must be able to write it). |
+| `docs-base-url` | yes | — | Public base URL used for cross-crate link rewriting. |
+| `docs-root` | yes | — | Filesystem root of the docs site (runner must be able to write it). |
 | `force` | no | `false` | Overwrite existing doc versions (used by the regenerator). |
 | `expected-tag` | no | — | If set (e.g. `v0.16.2`), assert `HEAD` is exactly this tag before doing anything. |
 
@@ -54,8 +54,10 @@ only once the crates actually publish:
         uses: ./actions/cargo-doc
         with:
           version: ${{ steps.publish-tag.outputs.version }}
-          registry-name: groundhog
-          registry-token: ${{ secrets.GROUNDHOG_REGISTRY_TOKEN }}
+          registry-name: thruput
+          registry-token: ${{ secrets.THRUPUT_REGISTRY_TOKEN }}
+          docs-base-url: ${{ vars.DOCS_BASE_URL }}
+          docs-root: ${{ vars.DOCS_ROOT }}
           toolchain: nightly-2026-01-30
           # packages / arch-only-packages: pass the same values as cargo-publish-dry-run if set
 ```
@@ -82,10 +84,8 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 jobs:
   regenerate-docs:
-    runs-on: hog1
+    runs-on: self-hosted
     steps:
-      - name: Clean up .gitconfig
-        run: rm -f /home/hogci/.gitconfig
       - name: Setup SSH Agent
         uses: webfactory/ssh-agent@v0.9.1
         with:
@@ -109,8 +109,10 @@ jobs:
         with:
           version: ${{ github.event.inputs.version }}
           packages: ${{ github.event.inputs.packages }}
-          registry-name: groundhog
-          registry-token: ${{ secrets.GROUNDHOG_REGISTRY_TOKEN }}
+          registry-name: thruput
+          registry-token: ${{ secrets.THRUPUT_REGISTRY_TOKEN }}
+          docs-base-url: ${{ vars.DOCS_BASE_URL }}
+          docs-root: ${{ vars.DOCS_ROOT }}
           toolchain: nightly-2026-01-30
           force: 'true'
           expected-tag: v${{ github.event.inputs.version }}

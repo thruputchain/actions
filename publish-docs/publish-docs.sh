@@ -2,12 +2,12 @@
 # Publish rustdoc output into the static docs tree served by Caddy.
 #
 # Usage: publish-docs.sh <crate> <version> <doc_dir> [lib_name]
-#   <crate>    crate name, e.g. groundhog-gateway
+#   <crate>    crate name, e.g. thruput-gateway
 #   <version>  semver, e.g. 0.16.2  (pre-releases contain a '-', e.g. 0.1.1-nightly.x)
 #   <doc_dir>  path to a freshly-built target/doc tree
 #   [lib_name] rustdoc entry subdir; defaults to <crate> with '-' replaced by '_'
 # Env:
-#   DOCS_ROOT      base docs directory (default /home/hog12/www/docs)
+#   DOCS_ROOT      base docs directory (required)
 #   FORCE=1        overwrite an already-published version (otherwise refused)
 #   SHARED_STATIC  1 (default) to serve rustdoc's static assets from one shared
 #                  directory instead of a private copy per crate; 0 to embed
@@ -23,13 +23,15 @@
 # build directory, and doing it here is what keeps the far side cheap).
 set -euo pipefail
 
-DOCS_ROOT="${DOCS_ROOT:-/home/hog12/www/docs}"
+DOCS_ROOT="${DOCS_ROOT:-}"
 SHARED_STATIC="${SHARED_STATIC:-1}"
 PUBLISH_JOBS="${PUBLISH_JOBS:-4}"
 # Shared rustdoc assets live here, beside the crate directories. The leading
 # underscore keeps it out of the crate namespace.
 STATIC_DIR="_static"
 die() { echo "publish-docs: $*" >&2; exit 1; }
+
+[ -n "$DOCS_ROOT" ] || die "DOCS_ROOT is not set"
 
 # Regenerate the top-level docs landing page: one entry per crate -> its latest.
 # The `latest` test also filters out non-crate entries such as $STATIC_DIR.

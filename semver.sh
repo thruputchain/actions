@@ -11,7 +11,7 @@
 # The prefix is interpolated verbatim, so callers escape regex metacharacters
 # in it first. Build metadata ('+sha') is deliberately not accepted -- nothing
 # in this pipeline emits it.
-groundhog_semver_regex() { # groundhog_semver_regex [escaped-prefix]
+semver_regex() { # semver_regex [escaped-prefix]
   local prefix="${1-}"
   # Core: no leading zeros in any component.
   local core='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'

@@ -34,7 +34,7 @@ pull request is checked against the last release of its own branch history.
 ```yaml
 - uses: thruputchain/actions/cargo-semver-checks@main
   with:
-    registry-token: ${{ secrets.GROUNDHOG_REGISTRY_TOKEN }}
+    registry-token: ${{ secrets.THRUPUT_REGISTRY_TOKEN }}
 ```
 
 ### Pin the tool version
@@ -47,7 +47,7 @@ workflow), since the rustdoc JSON format the tool reads comes from it.
 - uses: thruputchain/actions/cargo-semver-checks@main
   with:
     semver-checks-version: '0.50.0'
-    registry-token: ${{ secrets.GROUNDHOG_REGISTRY_TOKEN }}
+    registry-token: ${{ secrets.THRUPUT_REGISTRY_TOKEN }}
 ```
 
 ### Check specific packages
@@ -55,7 +55,7 @@ workflow), since the rustdoc JSON format the tool reads comes from it.
 ```yaml
 - uses: thruputchain/actions/cargo-semver-checks@main
   with:
-    packages: 'groundhog-xdr groundhog-syscall'
+    packages: 'thruput-xdr thruput-syscall'
 ```
 
 ### Compare against an explicit baseline
@@ -98,7 +98,7 @@ jobs:
         with:
           exclude: 'some-internal-crate'
           semver-checks-version: '0.50.0'
-          registry-token: ${{ secrets.GROUNDHOG_REGISTRY_TOKEN }}
+          registry-token: ${{ secrets.THRUPUT_REGISTRY_TOKEN }}
 
       # ... tag and publish steps follow
 ```
@@ -124,7 +124,7 @@ check, and one that carries the credential caveat below.
 | `features` | No | `''` | Space-separated extra features enabled in both builds. |
 | `release-type` | No | `''` | Force `major`, `minor`, or `patch` instead of deriving it from version numbers. |
 | `target` | No | `''` | Build target, e.g. `x86_64-unknown-linux-gnu`. Defaults to the host target. |
-| `registry-name` | No | `groundhog` | Private registry name as defined in `.cargo/config.toml`. |
+| `registry-name` | No | `thruput` | Private registry name as defined in `.cargo/config.toml`. |
 | `registry-token` | No | `''` | Auth token for the private registry. |
 | `semver-checks-version` | No | `''` | `cargo-semver-checks` version to install. Empty installs the latest release. |
 

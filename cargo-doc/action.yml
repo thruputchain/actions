@@ -1,6 +1,6 @@
 name: 'Cargo Doc Publish'
 description: 'Builds rustdoc for each publishable workspace crate (docs.rs-style: --no-deps with a rustdoc cross-crate link map) and uploads it to the versioned static docs site via publish-docs.sh. Intended for a self-hosted runner with the docs site on a shared/NFS filesystem.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   version:
@@ -25,19 +25,17 @@ inputs:
   registry-name:
     description: 'Private registry name as defined in .cargo/config.toml. Cross-crate links to deps from this registry are mapped to docs-base-url.'
     required: false
-    default: 'groundhog'
+    default: 'thruput'
   registry-token:
     description: 'Auth token for the private registry, so the doc build can resolve registry dependencies. Omit if all deps are workspace-local or crates.io.'
     required: false
     default: ''
   docs-base-url:
     description: 'Public base URL of the docs site. Registry dependency links resolve to <docs-base-url>/<crate>/<version>/<crate>/...'
-    required: false
-    default: 'https://groundhog.dev/docs'
+    required: true
   docs-root:
     description: 'Filesystem base directory of the docs site served by Caddy (must be writable by the runner).'
-    required: false
-    default: '/home/hog12/www/docs'
+    required: true
   force:
     description: 'Overwrite already-published doc versions (use for idempotent regeneration).'
     required: false
@@ -148,6 +146,12 @@ runs:
       run: |
         set -euo pipefail
         source "$HOME/.cargo/env"
+
+        # Composite actions do not enforce required inputs.
+        if [ -z "$DOCS_BASE_URL" ] || [ -z "$DOCS_ROOT" ]; then
+          echo "::error::docs-base-url and docs-root are required"
+          exit 1
+        fi
 
         # Ensure the nightly toolchain (with cargo) is present; the rustdoc map
         # is a nightly-only cargo feature.

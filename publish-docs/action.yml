@@ -1,10 +1,10 @@
 name: 'Publish Rust Docs'
 description: 'Installs a built target/doc tree into the versioned static docs site served by Caddy (per-version directories + a latest symlink). Intended to run on a self-hosted runner with the docs site on a shared/NFS filesystem.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   crate:
-    description: 'Crate name, e.g. groundhog-gateway'
+    description: 'Crate name, e.g. thruput-gateway'
     required: true
   version:
     description: 'Version string, e.g. 0.16.2 (pre-releases contain a "-", e.g. 0.1.1-nightly.x). Typically the version output of the cargo-version-tag action.'
@@ -19,8 +19,7 @@ inputs:
     default: ''
   docs-root:
     description: 'Base directory of the static docs site served by Caddy'
-    required: false
-    default: '/home/hog12/www/docs'
+    required: true
   force:
     description: 'Overwrite an already-published version instead of failing'
     required: false

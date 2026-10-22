@@ -1,6 +1,6 @@
 name: 'Cargo Publish Prerelease'
 description: 'Publishes workspace crates to a cargo registry at their current Cargo.toml version, with no git-tag coupling. Intended for nightly/prerelease versions. Registry index is read from .cargo/config.toml in the calling repo.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   registry-name:

@@ -27,12 +27,12 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(step=step["name"]):
                 self.assertEqual(step["env"]["REGISTRY_NAME"], "${{ inputs.registry-name }}")
                 self.assertIn("source.${REGISTRY_NAME}.replace-with", step["run"])
-                self.assertNotIn("source.groundhog.replace-with", step["run"])
+                self.assertNotIn("source.thruput.replace-with", step["run"])
 
     def test_offline_vendored_dependency_with_default_and_explicit_registry(self):
-        self.assertEqual(self.action["inputs"]["registry-name"]["default"], "groundhog")
+        self.assertEqual(self.action["inputs"]["registry-name"]["default"], "thruput")
         step = next(step for step in self.steps if step["name"] == "Build documentation")
-        for inputs in ({}, {"registry-name": "thruput"}):
+        for inputs in ({}, {"registry-name": "other"}):
             registry = inputs.get("registry-name", self.action["inputs"]["registry-name"]["default"])
             with self.subTest(inputs=inputs), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)

@@ -16,7 +16,7 @@ verdict() { # verdict <tag> [prefix] -> "accept" | "reject"
 check "stable with default 'v' prefix"   accept "$(verdict v1.2.3 v)"
 check "stable, multi-digit components"   accept "$(verdict v10.20.30 v)"
 check "stable with empty prefix"         accept "$(verdict 1.2.3 '')"
-check "stable with crate-scoped prefix"  accept "$(verdict groundhog-erc20-if-v0.1.23 groundhog-erc20-if-v)"
+check "stable with crate-scoped prefix"  accept "$(verdict thruput-erc20-if-v0.1.23 thruput-erc20-if-v)"
 
 # ---- Accepted: pre-releases (the point of this change) ----
 # v0.15.1-rc.1 is what cargo-version-tag derives from a 0.15.1-rc.1 workspace,
@@ -27,7 +27,7 @@ check "dotted pre-release"               accept "$(verdict v1.0.0-alpha.1 v)"
 # The shape cargo-nightly-version emits.
 check "nightly pre-release"              accept "$(verdict v0.15.2-nightly.20260905.gabc1234 v)"
 check "pre-release with empty prefix"    accept "$(verdict 0.15.1-rc.1 '')"
-check "pre-release, scoped prefix"       accept "$(verdict groundhog-erc20-if-v0.1.23-rc.2 groundhog-erc20-if-v)"
+check "pre-release, scoped prefix"       accept "$(verdict thruput-erc20-if-v0.1.23-rc.2 thruput-erc20-if-v)"
 
 # ---- Rejected: malformed tags ----
 check "missing required prefix"          reject "$(verdict 1.2.3 v)"

@@ -28,10 +28,10 @@ cat > "$TMP" <<'EOF'
 version = "0.17.1"
 
 [workspace.dependencies]
-groundhog-xdr = { path = "groundhog-xdr", version = "=0.17.1", registry = "groundhog" }
-groundhog_rpc = { path = "groundhog_rpc", version = "=0.17.1", registry = "groundhog" }
-xdrs = { registry = "groundhog", version = "0.7.1" }
-rpc_driver = { version = "0.8.2", registry = "groundhog" }
+thruput-xdr = { path = "thruput-xdr", version = "=0.17.1", registry = "thruput" }
+thruput_rpc = { path = "thruput_rpc", version = "=0.17.1", registry = "thruput" }
+xdrs = { registry = "thruput", version = "0.7.1" }
+rpc_driver = { version = "0.8.2", registry = "thruput" }
 EOF
 
 bash "$SCRIPT" apply "0.17.1" "0.17.2-nightly.20260622.gabc1234" "$TMP"
@@ -39,9 +39,9 @@ bash "$SCRIPT" apply "0.17.1" "0.17.2-nightly.20260622.gabc1234" "$TMP"
 check "workspace.package rewritten" \
   'version = "0.17.2-nightly.20260622.gabc1234"' \
   "$(grep -m1 '^version = ' "$TMP")"
-check "internal pin groundhog-xdr rewritten" \
+check "internal pin thruput-xdr rewritten" \
   '1' \
-  "$(grep -c 'groundhog-xdr = { path = "groundhog-xdr", version = "=0.17.2-nightly.20260622.gabc1234"' "$TMP")"
+  "$(grep -c 'thruput-xdr = { path = "thruput-xdr", version = "=0.17.2-nightly.20260622.gabc1234"' "$TMP")"
 # both internal pins rewritten => two occurrences total
 check "both internal pins rewritten" \
   '2' \

@@ -1,6 +1,6 @@
 name: 'Cargo Nightly Version'
 description: 'Computes a <next-patch>-nightly.<date>.g<sha> prerelease version and rewrites the workspace Cargo.toml in place (uncommitted). Reusable across cargo workspaces.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   cargo-toml-path:
@@ -56,7 +56,7 @@ runs:
           # Ephemeral local commit so cargo package/publish see a clean tree.
           # NOT pushed; the caller tags the original pre-bump commit. Only the
           # manifest is staged (avoids staging the runtime actions/ or vendor/ dirs).
-          git config user.email "nightly-bot@groundhog.local"
+          git config user.email "nightly-bot@thruput.local"
           git config user.name "nightly-bot"
           git add -- "$CARGO_TOML_PATH"
           git commit -q -m "ephemeral nightly version $NEW (not pushed)"

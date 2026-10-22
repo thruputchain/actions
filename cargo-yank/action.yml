@@ -1,6 +1,6 @@
 name: 'Cargo Yank'
 description: 'Yanks (or un-yanks) a published version of workspace crates from a cargo registry. Registry configuration is read from .cargo/config.toml in the calling repository.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   version:
