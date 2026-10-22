@@ -34,7 +34,7 @@ jobs:
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `registry-name` | Private registry name in `.cargo/config.toml` | No | `groundhog` |
+| `registry-name` | Private registry name in `.cargo/config.toml` | No | `thruput` |
 | `cargo-toml-path` | Path to Cargo.toml file | No | `./Cargo.toml` |
 | `packages` | Space-separated list of package names to validate. If not provided, all workspace packages will be processed. | No | - |
 | `cargo-hack-feature-options` | Feature testing options for cargo-hack | No | `--feature-powerset` |

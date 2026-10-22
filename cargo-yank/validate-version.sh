@@ -16,7 +16,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 VERSION="${1?version required}"
 
-SEMVER_REGEX="$(groundhog_semver_regex)"
+SEMVER_REGEX="$(thruput_semver_regex)"
 
 if [[ ! "$VERSION" =~ $SEMVER_REGEX ]]; then
   echo "::error::Invalid version format: '$VERSION'"

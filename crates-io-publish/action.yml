@@ -1,6 +1,6 @@
 name: 'crates.io Publish'
 description: 'Publishes a group of same-version Rust crates to crates.io: creates crates that do not exist yet with a bootstrap token and registers their trusted publisher, publishes new versions through trusted publishing, and skips versions already published.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   mode:

@@ -1,6 +1,6 @@
 name: 'Cargo Semver Checks'
 description: 'Runs cargo-semver-checks against a baseline (by default the nearest reachable release tag) to catch API-breaking changes that the version bump does not account for.'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   cargo-toml-path:
@@ -50,7 +50,7 @@ inputs:
   registry-name:
     description: 'Private registry name as defined in .cargo/config.toml. Used with registry-token to authenticate dependency resolution.'
     required: false
-    default: 'groundhog'
+    default: 'thruput'
   registry-token:
     description: 'Auth token for the private registry, so both the baseline and current builds can resolve registry dependencies. Omit if all deps are workspace-local or crates.io.'
     required: false

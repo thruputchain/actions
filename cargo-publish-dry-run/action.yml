@@ -1,12 +1,12 @@
 name: 'Cargo Publish Dry Run'
 description: 'Validates Rust crates by vendoring dependencies, building, testing, and packaging without publishing'
-author: 'Groundhog Team'
+author: 'Thruput Team'
 
 inputs:
   registry-name:
     description: 'Private registry name as defined in .cargo/config.toml; its dependencies are resolved from vendor/ during verification.'
     required: false
-    default: 'groundhog'
+    default: 'thruput'
   cargo-toml-path:
     description: 'Path to Cargo.toml file'
     required: false
