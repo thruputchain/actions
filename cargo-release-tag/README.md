@@ -47,7 +47,7 @@ tag on another commit means someone forgot to bump):
 ```yaml
 - name: Tag commit with version
   id: publish-tag
-  uses: ./actions/cargo-release-tag
+  uses: thruputchain/actions/cargo-release-tag@<commit-sha>
   with:
     packages: crate-a crate-b crate-c
     github-token: ${{ github.token }}
@@ -58,7 +58,7 @@ Independently-versioned crate that doesn't bump every release:
 ```yaml
 - name: Tag my-crate
   id: tag-my-crate
-  uses: ./actions/cargo-release-tag
+  uses: thruputchain/actions/cargo-release-tag@<commit-sha>
   with:
     packages: my-crate
     tag-prefix: 'my-crate-v'
@@ -70,7 +70,7 @@ Independently-versioned crate that doesn't bump every release:
 
 - name: Publish my-crate
   if: ${{ steps.tag-my-crate.outputs.released == 'true' }}
-  uses: ./actions/cargo-publish
+  uses: thruputchain/actions/cargo-publish@<commit-sha>
   with:
     packages: my-crate
     git-tag: ${{ steps.tag-my-crate.outputs.tag }}

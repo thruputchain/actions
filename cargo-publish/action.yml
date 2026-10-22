@@ -59,13 +59,14 @@ runs:
         set -euo pipefail
         echo "Verifying current commit is tagged with '$GIT_TAG'..."
 
-        if ! git rev-parse "$GIT_TAG" >/dev/null 2>&1; then
+        # refs/tags/ so a branch of the same name can never satisfy the check.
+        if ! git rev-parse -q --verify "refs/tags/$GIT_TAG^{commit}" >/dev/null; then
           echo "::error::Git tag '$GIT_TAG' does not exist in this repository"
           echo "::error::Please ensure the tag exists and is pushed to the remote"
           exit 1
         fi
 
-        TAG_COMMIT=$(git rev-parse "$GIT_TAG^{commit}")
+        TAG_COMMIT=$(git rev-parse "refs/tags/$GIT_TAG^{commit}")
         CURRENT_COMMIT=$(git rev-parse HEAD)
 
         if [ "$TAG_COMMIT" != "$CURRENT_COMMIT" ]; then
@@ -91,7 +92,8 @@ runs:
         if [ -z "$TAG_PREFIX" ]; then
           TAG_VERSION="$GIT_TAG"
         else
-          TAG_VERSION="${GIT_TAG#$TAG_PREFIX}"
+          # Quoted so a prefix containing glob characters is stripped literally.
+          TAG_VERSION="${GIT_TAG#"$TAG_PREFIX"}"
         fi
         echo "OK: Extracted version: $TAG_VERSION"
         echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
@@ -133,22 +135,22 @@ runs:
           VALIDATION_FAILED=0
           for package in $PACKAGES; do
             # Check if package exists in workspace
-            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+            if ! grep -qxF -- "$package" <<<"$WORKSPACE_PACKAGES"; then
               echo "::error::Package '$package' not found in workspace"
               VALIDATION_FAILED=1
               continue
             fi
-            
+
             # Check if package has publish=false (appears as empty array [] in cargo metadata)
             IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
               '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
-            
+
             if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
               echo "::error::Package '$package' has publish=false in Cargo.toml and cannot be published"
               VALIDATION_FAILED=1
             fi
           done
-          
+
           if [ $VALIDATION_FAILED -eq 1 ]; then
             echo "::error::One or more provided packages are invalid or have publish disabled"
             exit 1
@@ -230,15 +232,21 @@ runs:
         MISMATCHED_DEPS=""
         PACKAGES_NEWLINE=$(echo "$PACKAGES" | tr ' ' '\n')
 
+        # A single exact-ish requirement: optional operator, X.Y.Z, optional
+        # pre-release suffix. The suffix is included so a pre-release tag
+        # (0.15.1-rc.1) is checked against pre-release requirements rather
+        # than skipped.
+        DEP_REQ_RE='^[\^=~]?([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+
         for package_name in $PACKAGES; do
           DEPENDENCIES=$(echo "$METADATA" | jq -r --arg pkg "$package_name" \
             '.packages[] | select(.name == $pkg) | .dependencies[] | "\(.name):\(.req)"')
 
           if [ -n "$DEPENDENCIES" ]; then
             while IFS=':' read -r dep_name dep_req; do
-              if echo "$PACKAGES_NEWLINE" | grep -q "^${dep_name}$"; then
-                if [[ "$dep_req" =~ ^[\^=~]?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-                  REQ_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+              if grep -qxF -- "$dep_name" <<<"$PACKAGES_NEWLINE"; then
+                if [[ "$dep_req" =~ $DEP_REQ_RE ]]; then
+                  REQ_VERSION="${BASH_REMATCH[1]}"
 
                   if [ "$REQ_VERSION" != "$TAG_VERSION" ]; then
                     echo "::error::DEPENDENCY VERSION MISMATCH in package '$package_name'!"
@@ -382,11 +390,13 @@ runs:
           echo "Publishing with --no-verify (verification performed in the dry-run job)"
         fi
 
+        METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+
         # Publish each package individually, skipping those with publish=false or already published
         for package in $PACKAGES; do
           # Check if package has publish=false (appears as empty array [] in cargo metadata)
-          IS_PUBLISH_DISABLED=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
-            jq -r '.packages[] | select(.name=="'$package'") | if .publish == [] then "true" else "false" end')
+          IS_PUBLISH_DISABLED=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | if .publish == [] then "true" else "false" end')
 
           if [ "$IS_PUBLISH_DISABLED" = "true" ]; then
             echo "SKIP: Package $package has publish=false, skipping publish"
@@ -395,8 +405,8 @@ runs:
           fi
 
           # Get package version for logging
-          PACKAGE_VERSION=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps | \
-            jq -r '.packages[] | select(.name=="'$package'") | .version')
+          PACKAGE_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$package" \
+            '.packages[] | select(.name == $pkg) | .version')
 
           echo "Publishing package: $package version $PACKAGE_VERSION"
 

@@ -63,7 +63,11 @@ runs:
         source "$HOME/.cargo/env"
         echo "Creating vendor directory..."
         mkdir -p vendor
-        cargo vendor --locked --versioned-dirs
+        # --manifest-path so a non-default cargo-toml-path vendors the right
+        # workspace. The vendor/ directory stays relative to the working
+        # directory, matching the source.vendored-sources.directory override
+        # every later step passes.
+        cargo vendor --locked --versioned-dirs --manifest-path "$CARGO_TOML_PATH"
         echo "OK: Vendored dependencies to ./vendor/"
 
     - name: Pre-vendor workspace dependencies
@@ -116,7 +120,7 @@ runs:
           VALIDATION_FAILED=0
           for package in $PACKAGES; do
             # Check if package exists in workspace
-            if ! echo "$WORKSPACE_PACKAGES" | grep -q "^${package}$"; then
+            if ! grep -qxF -- "$package" <<<"$WORKSPACE_PACKAGES"; then
               echo "::error::Package '$package' not found in workspace"
               VALIDATION_FAILED=1
               continue

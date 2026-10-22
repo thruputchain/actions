@@ -71,13 +71,13 @@ jobs:
         with:
           tool: cargo-hack
 
-      - uses: thruputchain/actions/cargo-publish-dry-run@v1
+      - uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
         with:
           packages: ${{ env.PACKAGES }}
           registry-name: crates-io
 
       - id: check
-        uses: thruputchain/actions/crates-io-publish@v1
+        uses: thruputchain/actions/crates-io-publish@<commit-sha>
         with:
           mode: check
           packages: ${{ env.PACKAGES }}
@@ -85,13 +85,13 @@ jobs:
 
       - id: tag
         if: steps.check.outputs.release == 'true' && !inputs.dry-run
-        uses: thruputchain/actions/cargo-release-tag@v1
+        uses: thruputchain/actions/cargo-release-tag@<commit-sha>
         with:
           packages: ${{ env.PACKAGES }}
           github-token: ${{ github.token }}
 
       - if: steps.check.outputs.release == 'true' && !inputs.dry-run
-        uses: thruputchain/actions/crates-io-publish@v1
+        uses: thruputchain/actions/crates-io-publish@<commit-sha>
         with:
           mode: publish
           packages: ${{ env.PACKAGES }}

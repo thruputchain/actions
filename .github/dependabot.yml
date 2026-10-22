@@ -1,0 +1,17 @@
+# Keeps the SHA-pinned `uses:` lines current. The github-actions ecosystem
+# scans .github/workflows/ under "/" and the action.yml in each listed
+# directory, so every directory holding a composite action that uses another
+# action must be listed here.
+#
+# Not covered: the actionlint and zizmor release binaries that
+# workflow-lint.yml downloads, pinned by version and checksum in its inputs.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/cargo-semver-checks"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

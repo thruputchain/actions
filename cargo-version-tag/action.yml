@@ -69,7 +69,7 @@ runs:
           # Validate that all provided packages exist in workspace
           ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
           for package in $PACKAGES_TO_CHECK; do
-            if ! echo "$ALL_PACKAGES" | grep -q "^${package}$"; then
+            if ! grep -qxF -- "$package" <<<"$ALL_PACKAGES"; then
               echo "ERROR: Package '$package' not found in workspace"
               exit 1
             fi

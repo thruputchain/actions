@@ -2,6 +2,20 @@
 
 A collection of reusable GitHub Actions for the thruputchain organization.
 
+## Versioning
+
+There are no release tags. Pin every `uses:` line to a full commit SHA from `main`, which is
+what the `workflow-lint` workflow's zizmor policy requires of callers anyway:
+
+```yaml
+- uses: thruputchain/actions/cargo-publish@0123456789abcdef0123456789abcdef01234567 # main 2026-10-22
+```
+
+`<commit-sha>` in the examples below stands for such a pin. Dependabot keeps the pins in this
+repository's own workflows current (`.github/dependabot.yml`); the actionlint and zizmor
+binaries that `workflow-lint` downloads are pinned by version and checksum in that workflow's
+inputs and need a manual bump.
+
 ## Available Actions
 
 ### cargo-publish
@@ -11,7 +25,7 @@ matches the workspace version. Handles stable and pre-release tags alike (`v1.2.
 
 **Usage:**
 ```yaml
-- uses: thruputchain/actions/cargo-publish@v1
+- uses: thruputchain/actions/cargo-publish@<commit-sha>
   with:
     git-tag: ${{ github.ref_name }}
     registry-name: ${{ vars.CARGO_REGISTRY_NAME }}
@@ -27,7 +41,7 @@ every feature combination offline. It does not run tests.
 
 **Usage:**
 ```yaml
-- uses: thruputchain/actions/cargo-publish-dry-run@v1
+- uses: thruputchain/actions/cargo-publish-dry-run@<commit-sha>
   with:
     cargo-toml-path: './Cargo.toml'
 ```
@@ -40,7 +54,7 @@ Runs `cargo-semver-checks` against a baseline (by default the nearest release ta
 
 **Usage:**
 ```yaml
-- uses: thruputchain/actions/cargo-semver-checks@v1
+- uses: thruputchain/actions/cargo-semver-checks@<commit-sha>
   with:
     semver-checks-version: '0.50.0'
     registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -59,12 +73,46 @@ git tag (it does not push it).
 
 **Usage:**
 ```yaml
-- uses: thruputchain/actions/cargo-version-tag@v1
+- uses: thruputchain/actions/cargo-version-tag@<commit-sha>
   with:
     cargo-toml-path: './Cargo.toml'
 ```
 
 See [cargo-version-tag/README.md](./cargo-version-tag/README.md) for detailed documentation.
+
+### cargo-release-tag
+
+Tags HEAD with the crate version, pushes the tag, and decides whether this commit is the release
+commit for that version, consulting the registry when the remote tag already sits on another
+commit. Gate the publish steps on its `released` output.
+
+**Usage:**
+```yaml
+- id: tag
+  uses: thruputchain/actions/cargo-release-tag@<commit-sha>
+  with:
+    packages: crate-a crate-b
+    github-token: ${{ github.token }}
+```
+
+See [cargo-release-tag/README.md](./cargo-release-tag/README.md) for detailed documentation.
+
+### cargo-yank
+
+Yanks (or un-yanks) one version of the workspace crates from crates.io or a private registry.
+A version the registry has never seen is skipped per crate, but the run fails if nothing was
+yanked at all.
+
+**Usage:**
+```yaml
+- uses: thruputchain/actions/cargo-yank@<commit-sha>
+  with:
+    version: '1.2.3'
+    registry-name: ${{ vars.CARGO_REGISTRY_NAME }}
+    registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+```
+
+See [cargo-yank/README.md](./cargo-yank/README.md) for detailed documentation.
 
 ### crates-io-publish
 
@@ -80,19 +128,19 @@ publishes from the tagged commit.
 **Usage:**
 ```yaml
 - id: check
-  uses: thruputchain/actions/crates-io-publish@v1
+  uses: thruputchain/actions/crates-io-publish@<commit-sha>
   with:
     mode: check
     packages: my-crate-macros my-crate
     bootstrap-token: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
 - id: tag
   if: steps.check.outputs.release == 'true'
-  uses: thruputchain/actions/cargo-release-tag@v1
+  uses: thruputchain/actions/cargo-release-tag@<commit-sha>
   with:
     packages: my-crate-macros my-crate
     github-token: ${{ github.token }}
 - if: steps.check.outputs.release == 'true'
-  uses: thruputchain/actions/crates-io-publish@v1
+  uses: thruputchain/actions/crates-io-publish@<commit-sha>
   with:
     mode: publish
     packages: my-crate-macros my-crate
@@ -114,6 +162,58 @@ can always also be yanked. Each has its own test script; run both after changing
 ```bash
 bash cargo-publish/test_validate_tag.sh
 bash cargo-yank/test_validate_version.sh
+```
+
+## Reusable Workflows
+
+Called as a job with `uses:` (not as a step). Each file's header comment shows the call.
+
+### workflow-lint
+
+Runs actionlint (with shellcheck and pyflakes), then zizmor, over the caller's workflows and
+action definitions. Optionally shellchecks tracked `*.sh` files and runs an advisory zizmor
+pedantic pass. Requires a Linux x86-64 runner.
+
+```yaml
+jobs:
+  workflow-lint:
+    permissions:
+      contents: read
+    uses: thruputchain/actions/.github/workflows/workflow-lint.yml@<commit-sha>
+```
+
+### rust-dependency-policy
+
+Runs `cargo deny check` against the caller's `deny.toml`, all four checks by default or the
+subset given in `checks`. Takes an optional private registry name and token.
+
+```yaml
+jobs:
+  dependency-policy:
+    permissions:
+      contents: read
+    uses: thruputchain/actions/.github/workflows/rust-dependency-policy.yml@<commit-sha>
+```
+
+### rust-advisory-issue
+
+Files (or comments on) a tracking issue when a scheduled advisory scan fails. Pair it with
+`rust-dependency-policy` as a job that runs on its failure; the job needs `issues: write`.
+
+```yaml
+jobs:
+  scan:
+    permissions:
+      contents: read
+    uses: thruputchain/actions/.github/workflows/rust-dependency-policy.yml@<commit-sha>
+    with: { checks: advisories }
+  notify:
+    needs: scan
+    if: failure()
+    permissions:
+      contents: read
+      issues: write
+    uses: thruputchain/actions/.github/workflows/rust-advisory-issue.yml@<commit-sha>
 ```
 
 ## License

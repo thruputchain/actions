@@ -18,7 +18,7 @@ which tags and pushes in one step.
 ### Basic Usage
 
 ```yaml
-- uses: thruputchain/actions/cargo-version-tag@v1
+- uses: thruputchain/actions/cargo-version-tag@<commit-sha>
   with:
     cargo-toml-path: './Cargo.toml'
 ```
@@ -26,7 +26,7 @@ which tags and pushes in one step.
 ### Selected Packages
 
 ```yaml
-- uses: thruputchain/actions/cargo-version-tag@v1
+- uses: thruputchain/actions/cargo-version-tag@<commit-sha>
   with:
     packages: 'my-crate-core my-crate-utils'
 ```
@@ -37,7 +37,7 @@ used for the tag.
 ### Custom Tag Prefix
 
 ```yaml
-- uses: thruputchain/actions/cargo-version-tag@v1
+- uses: thruputchain/actions/cargo-version-tag@<commit-sha>
   with:
     cargo-toml-path: './Cargo.toml'
     tag-prefix: 'release-'
@@ -62,7 +62,7 @@ jobs:
 
       - name: Create version tag
         id: tag
-        uses: thruputchain/actions/cargo-version-tag@v1
+        uses: thruputchain/actions/cargo-version-tag@<commit-sha>
         with:
           cargo-toml-path: './Cargo.toml'
 
