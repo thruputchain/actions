@@ -1,7 +1,7 @@
 # Publish Rust Docs
 
-Installs a built `target/doc` tree into the versioned static docs site served by
-Caddy at `sfgh.stellar.org` / `groundhog.dev` under `/docs/`.
+Installs a built `target/doc` tree into a versioned static docs site served by
+Caddy under `/docs/`.
 
 This replaces the broken kellnr doc-generation path. It is the **receive + serve**
 half: it takes an already-built `target/doc` and places it on the site. You still
@@ -110,6 +110,5 @@ privileges and never touches the real site:
 
 ## Access
 
-`/docs/*` is served behind the same basic auth as `/builds/*` in the Caddy
-config. The publish script `chmod`s output group/other-readable so the `caddy`
-user can serve it.
+The publish script `chmod`s output group/other-readable so the `caddy` user can
+serve it. Access control for `/docs/*` belongs in the Caddy config.
