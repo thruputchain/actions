@@ -43,6 +43,14 @@ inputs:
     description: 'publish: space-separated owners invited to each crate this run creates, as `cargo owner --add` takes them (`github:org:team` or a username).'
     required: false
     default: ''
+  require-trusted-publishing:
+    description: >-
+      publish: "true" (default) to turn on "Require trusted publishing for all
+      new versions" for each crate this run creates, once its trusted
+      publisher is registered, so crates.io refuses new versions published
+      with an API token. Uses bootstrap-token; "false" leaves the setting off.
+    required: false
+    default: 'true'
   publish-args:
     description: 'publish: extra `cargo publish` arguments, e.g. "--all-features".'
     required: false
@@ -89,6 +97,7 @@ runs:
         GIT_TAG: ${{ inputs.git-tag }}
         BOOTSTRAP_TOKEN: ${{ inputs.bootstrap-token }}
         CRATE_OWNERS: ${{ inputs.crate-owners }}
+        REQUIRE_TRUSTED_PUBLISHING: ${{ inputs.require-trusted-publishing }}
         PUBLISH_ARGS: ${{ inputs.publish-args }}
       run: bash "$ACTION_PATH/publish.sh"
 

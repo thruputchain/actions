@@ -8,7 +8,7 @@ For each package, in the order given:
 
 | On crates.io | What happens |
 |--------------|--------------|
-| Crate doesn't exist | Created with `bootstrap-token`. `crate-owners` are invited and the job's workflow is registered as the crate's trusted publisher, so later releases need no stored token. |
+| Crate doesn't exist | Created with `bootstrap-token`. `crate-owners` are invited, the job's workflow is registered as the crate's trusted publisher, and trusted publishing is made required for its new versions (see `require-trusted-publishing`), so later releases need no stored token and API tokens can't publish it. |
 | Crate exists, version doesn't | Published through trusted publishing: the job's GitHub OIDC token is exchanged for a crates.io token, used for that crate, then revoked. |
 | Version exists | Skipped, once it's shown to be this release (see below); otherwise the run fails. |
 
@@ -150,6 +150,11 @@ existing crates in the group that lack one (for example, crates first published 
 run fails if any crate is left without one. Once every crate exists, remove the secret and revoke
 the token.
 
+The `trusted-publishing` scope also covers requiring trusted publishing (`require-trusted-publishing`).
+Once that's on, crates.io refuses a new version published with any API token, including an
+owner's `cargo publish` by hand; to publish that way, untick the setting in the crate's crates.io
+settings first.
+
 ## Inputs
 
 | Input | Description | Required | Default |
@@ -161,6 +166,7 @@ the token.
 | `git-tag` | `publish`: the release tag; must point at HEAD | For `publish` | |
 | `bootstrap-token` | crates.io API token for creating crates (see Credentials) | While creating crates | |
 | `crate-owners` | `publish`: owners invited to each crate this run creates (`github:org:team` or a username) | No | |
+| `require-trusted-publishing` | `publish`: turn on "Require trusted publishing for all new versions" for each crate this run creates, after registering its trusted publisher; `false` leaves it off. A failure fails the run | No | `true` |
 | `publish-args` | `publish`: extra `cargo publish` arguments, e.g. `--all-features` | No | |
 
 ## Outputs (`check`)

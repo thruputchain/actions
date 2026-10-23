@@ -32,6 +32,7 @@ claims = {"repository": "o/r", "repository_owner_id": "1",
           "environment": None}
 oidc_tokens = {}  # crates.io trusted publishing token -> allowed crate keys
 rate_limited = set()  # crate keys whose next new-crate publish gets a 429
+reject_patch = False  # whether crate settings updates fail
 retry_after = 0  # seconds from now the 429 says to retry after
 log = []
 
@@ -137,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.error(404, "no route")
 
     def do_POST(self):
-        global retry_after
+        global retry_after, reject_patch
         url = urlparse(self.path)
         auth = self.headers.get("Authorization")
         body = self.read_json()
@@ -166,6 +167,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.error(429, "You have published too many new crates in a short period of time. "
                                   f"Please try again after {time.strftime('%a, %d %b %Y %H:%M:%S GMT', retry_at)} "
                                   "and see https://crates.io/docs/rate-limits for more details.")
+            if token == BOOTSTRAP and crates.get(k, {}).get("trustpub_only"):
+                return self.error(403, "New versions of this crate can only be published using Trusted Publishing")
             if token == BOOTSTRAP:
                 crates.setdefault(k, {"name": body["name"], "versions": set(), "configs": []})
             elif k not in oidc_tokens.get(token, []):
@@ -197,6 +200,7 @@ class Handler(BaseHTTPRequestHandler):
             for name in body.get("rate_limited", []):
                 rate_limited.add(key(name))
             retry_after = body.get("retry_after", retry_after)
+            reject_patch = body.get("reject_patch", reject_patch)
             claims.update(body.get("claims", {}))
             return self.reply(200, {})
         if url.path == "/_test/reset":
@@ -207,10 +211,24 @@ class Handler(BaseHTTPRequestHandler):
             oidc_tokens.clear()
             rate_limited.clear()
             retry_after = 0
+            reject_patch = False
             log.clear()
             claims["environment"] = None
             return self.reply(200, {})
         return self.error(404, "no route")
+
+    def do_PATCH(self):
+        url = urlparse(self.path)
+        auth = self.headers.get("Authorization")
+        body = self.read_json()
+        log.append(["PATCH", url.path, auth, body])
+        crate = crates.get(key(url.path.rsplit("/", 1)[1]))
+        if not crate:
+            return self.error(404, "not found")
+        if auth != BOOTSTRAP or reject_patch:
+            return self.error(403, "this token does not have the required permissions to perform this action")
+        crate["trustpub_only"] = body["crate"]["trustpub_only"]
+        return self.reply(200, {"crate": {"name": crate["name"], "trustpub_only": crate["trustpub_only"]}})
 
     def do_DELETE(self):
         auth = self.headers.get("Authorization") or ""
