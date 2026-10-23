@@ -44,6 +44,38 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(command=command.strip()):
                 self.assertIn("--locked", command.split())
 
+    def test_arch_only_packages_must_have_a_target_step(self):
+        # The guard runs before any cargo call, and nothing else runs when
+        # every package is architecture-only, so no stub is needed.
+        step = next(step for step in self.steps if step["name"] == "Verify packages with features")
+        def run(arch_only, wasm32, rv32):
+            bindings = {
+                "${{ inputs.registry-name }}": "thruput",
+                "${{ inputs.cargo-toml-path }}": "./Cargo.toml",
+                "${{ inputs.cargo-hack-feature-options }}": "",
+                "${{ steps.list-packages.outputs.packages }}": "runtime",
+                "${{ inputs.arch-only-packages }}": arch_only,
+                "${{ inputs.cargo-hack-wasm32-packages }}": wasm32,
+                "${{ inputs.cargo-hack-rv32-packages }}": rv32,
+            }
+            env = os.environ.copy()
+            for name, expression in step["env"].items():
+                env[name] = bindings[expression]
+            with tempfile.TemporaryDirectory() as directory:
+                return subprocess.run(["bash", "-c", step["run"]], cwd=directory, env=env,
+                                      capture_output=True, text=True, timeout=60)
+        # Listed for a target, as a YAML block with one name per line.
+        result = run("runtime", "runtime\n  helper\n", "")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Skipping runtime on host", result.stdout)
+        # Listed for no target: fail rather than let it through unverified.
+        result = run("runtime", "helper", "")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("nothing would build-verify it", result.stdout)
+        # Not a prefix match: "runtime" is not "runtime-helper".
+        result = run("runtime", "runtime-helper", "")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
     def test_offline_vendored_dependency_with_default_and_explicit_registry(self):
         self.assertEqual(self.action["inputs"]["registry-name"]["default"], "thruput")
         step = next(step for step in self.steps if step["name"] == "Build documentation")

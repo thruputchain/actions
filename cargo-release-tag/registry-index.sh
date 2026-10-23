@@ -65,22 +65,28 @@ fi
 ENV_NAME="CARGO_REGISTRIES_$(printf '%s' "$REGISTRY" | tr '[:lower:]-' '[:upper:]_')_INDEX"
 INDEX="${!ENV_NAME-}"
 config_index() { # config_index <config file> -> the index for $REGISTRY, or nothing
-  # The inline table under [registries], or the first `index =` inside the
-  # [registries.<name>] table (and before the next table header). Headers
-  # are compared after dropping whitespace and trailing comments, with the
-  # name bare or quoted; the name itself is matched literally.
-  awk -v name="$REGISTRY" '
-    function unquote(s) { sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); return s }
-    function header(s) { sub(/[[:space:]]*#.*$/, "", s); gsub(/[[:space:]]/, "", s); return s }
-    /^[[:space:]]*\[/ {
-      h = header($0)
-      registries = (h == "[registries]")
-      named = (h == "[registries." name "]" || h == "[registries.\"" name "\"]")
-      next
-    }
-    registries && index($0, name) == 1 && substr($0, length(name) + 1) ~ /^[[:space:]]*=.*index[[:space:]]*=/ { print unquote($0); exit }
-    named && /^[[:space:]]*index[[:space:]]*=/ { print unquote($0); exit }
-  ' "$1"
+  # Parsed as TOML, so every spelling cargo accepts (table or inline form,
+  # quoted keys, single-quoted strings, comments) resolves the same way.
+  python3 -I - "$1" "$REGISTRY" <<'PYEOF'
+import sys
+try:
+    import tomllib
+except ImportError:
+    print("::error::python3 >= 3.11 (tomllib) is needed to read .cargo/config.toml; "
+          "use a newer runner image or set CARGO_REGISTRIES_<NAME>_INDEX", file=sys.stderr)
+    sys.exit(1)
+path, name = sys.argv[1], sys.argv[2]
+with open(path, "rb") as f:
+    try:
+        config = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        print(f"::error::{path}: {e}", file=sys.stderr)
+        sys.exit(1)
+registry = (config.get("registries") or {}).get(name)
+index = registry.get("index") if isinstance(registry, dict) else None
+if isinstance(index, str):
+    print(index)
+PYEOF
 }
 # Walk the hierarchy cargo reads, nearest first, so the registry probed is
 # the one `cargo publish` run from this directory will use.
