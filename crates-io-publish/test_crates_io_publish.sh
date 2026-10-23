@@ -221,6 +221,8 @@ check "... and actually waits" true "$([ "$waited" -ge 2 ] && echo true || echo 
 check "owners invited" 1 "$(state '[.log[] | select(.[1] == "/_test/owner")] | length')"
 check "OIDC tokens revoked" '{}' "$(state .oidc_tokens)"
 
+r=$(run check BOOTSTRAP_TOKEN=boot)
+check "check on the tagged commit passes versions it published" "exit 0 true" "$(result "$r") $(output "$r" release)"
 r=$(run publish BOOTSTRAP_TOKEN=boot)
 check "re-run skips everything" "exit 0" "$(result "$r")"
 check "re-run uploads nothing" 0 \
@@ -228,6 +230,8 @@ check "re-run uploads nothing" 0 \
 check "re-run adds no publishers" '1 1' \
   "$(state '.crates["zz-new"].configs | length') $(state '.crates["zz-old"].configs | length')"
 seed_tampered zz-new 0.2.0
+r=$(run check BOOTSTRAP_TOKEN=boot)
+check "check on the tagged commit refuses a published version that isn't the tag's" "exit 1" "$(result "$r")"
 r=$(run publish BOOTSTRAP_TOKEN=boot)
 check "re-run refuses a published version that isn't the tag's" "exit 1" "$(result "$r")"
 check "... because it differs from crates.io's" 1 "$(grep -c 'its contents differ from zz-new at this commit' "$TMP/last.log" || true)"

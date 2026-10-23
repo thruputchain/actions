@@ -22,6 +22,7 @@ The action runs twice in a release job, around [`cargo-release-tag`](../cargo-re
     different versions;
   - a release tag already on another commit (see `on-existing-tag`);
   - a version already on crates.io with no release tag here;
+  - a version already on crates.io that doesn't come from the release tag (see below);
   - a new crate whose name crates.io already has. It treats `-`, `_` and case as the same, so
     `rpc_api` clashes with an existing `rpc-api`;
   - a new crate without `bootstrap-token`.

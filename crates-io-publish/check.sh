@@ -94,12 +94,19 @@ for pkg in $PACKAGES; do
     echo "::error::crates.io already has a crate named '$name', which it treats as the same name as '$pkg'"
     exit 1
   fi
-  # A re-run of a release commit finds its own versions published; without
-  # the tag, the version was released from somewhere else.
-  if [ -z "$TAG_SHA" ] && on_index "$pkg" "$VERSION"; then
-    echo "::error::$pkg@$VERSION is already on crates.io but $TAG does not exist in this repository"
-    echo "::error::Bump the version to release it from here"
-    exit 1
+  # A re-run of a release commit finds its own versions published, and
+  # publish will skip them, so they must be this commit's; without the tag,
+  # the version was released from somewhere else.
+  if on_index "$pkg" "$VERSION"; then
+    if [ -z "$TAG_SHA" ]; then
+      echo "::error::$pkg@$VERSION is already on crates.io but $TAG does not exist in this repository"
+      echo "::error::Bump the version to release it from here"
+      exit 1
+    fi
+    if ! published_from "$pkg" "$VERSION" "$HEAD_SHA"; then
+      echo "::error::crates.io's $pkg@$VERSION isn't the one $TAG releases: check who published it"
+      exit 1
+    fi
   fi
   echo "OK: $pkg exists on crates.io"
 done
