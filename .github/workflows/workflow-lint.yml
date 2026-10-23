@@ -209,15 +209,11 @@ jobs:
           repositories: ${{ inputs.lint-app-repositories }}
           permission-contents: read
 
+      # No token in this step: actionlint, pyflakes and shellcheck run code
+      # and read files from the checkout, and must not be able to reach the
+      # audit token. zizmor, which needs it, runs in the next step.
       - name: Lint
         env:
-          # The App token reads only lint-app-repositories and is revoked by
-          # the token action after the job. Callers without an App keep
-          # github.token. Handed to zizmor alone (as GH_TOKEN) below, so the
-          # linters that run code from the checkout never see it.
-          LINT_GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
-          ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
-          RUN_ZIZMOR: ${{ inputs.run-zizmor }}
           SHELLCHECK_SCRIPTS: ${{ inputs.shellcheck-scripts }}
         run: |
           set -euo pipefail
@@ -248,6 +244,17 @@ jobs:
           # silently.
           pyflakes_bin="$(command -v pyflakes)"
           actionlint -color -pyflakes "$pyflakes_bin"
+
+      - name: Audit workflows with zizmor
+        env:
+          # The App token reads only lint-app-repositories and is revoked by
+          # the token action after the job. Callers without an App keep
+          # github.token. Only this step holds it.
+          GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
+          ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
+          RUN_ZIZMOR: ${{ inputs.run-zizmor }}
+        run: |
+          set -euo pipefail
 
           if [ "$RUN_ZIZMOR" != "true" ]; then
             echo "::notice::zizmor skipped (run-zizmor=false); run it locally before merging workflow changes"
@@ -286,7 +293,7 @@ jobs:
           # several. If zizmor changes all of them the match stops working
           # and CI fails, which is the safe direction.
           zcfg=()
-          if out="$(GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
+          if out="$(zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
             printf '%s\n' "$out"
           elif printf '%s' "$out" | grep -qE "'(impostor-commit|stale-action-refs|ref-version-mismatch|ref-confusion|known-vulnerable-actions)' audit failed" &&
                printf '%s' "$out" | grep -qE 'no access|403 Forbidden|401 Unauthorized|git-upload-pack'; then
@@ -311,7 +318,7 @@ jobs:
           open(sys.argv[1], "w").write(src.rstrip("\n") + "\n" + extra)
           PYEOF
             zcfg=(--config "$fallback")
-            GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zcfg[@]}" "${zizmor_inputs[@]}"
+            zizmor --no-progress "${zcfg[@]}" "${zizmor_inputs[@]}"
           else
             printf '%s\n' "$out"
             exit 1
@@ -319,5 +326,5 @@ jobs:
 
           if [ "$ZIZMOR_PEDANTIC" = "true" ]; then
             echo "--- pedantic pass (advisory only) ---"
-            GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zcfg[@]}" --persona=pedantic "${zizmor_inputs[@]}" || true
+            zizmor --no-progress "${zcfg[@]}" --persona=pedantic "${zizmor_inputs[@]}" || true
           fi

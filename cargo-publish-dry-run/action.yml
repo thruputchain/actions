@@ -237,11 +237,17 @@ runs:
         set -euo pipefail
         source "$HOME/.cargo/env"
 
+        # The lists may arrive as YAML blocks; membership checks need one
+        # space between names, as the loops' word splitting already allows.
+        ARCH_ONLY_PACKAGES=$(printf ' %s ' "$ARCH_ONLY_PACKAGES" | tr -s '[:space:]' ' ')
+        WASM32_PACKAGES=$(printf ' %s ' "$WASM32_PACKAGES" | tr -s '[:space:]' ' ')
+        RV32_PACKAGES=$(printf ' %s ' "$RV32_PACKAGES" | tr -s '[:space:]' ' ')
+
         # An architecture-only crate is build-verified only by a per-target
         # step, so it must be listed for at least one target; otherwise it
         # would pass this action without ever being compiled.
         for package in $ARCH_ONLY_PACKAGES; do
-          case " $WASM32_PACKAGES $RV32_PACKAGES " in
+          case "$WASM32_PACKAGES$RV32_PACKAGES" in
             *" $package "*) ;;
             *)
               echo "::error::arch-only package '$package' is in neither cargo-hack-wasm32-packages nor cargo-hack-rv32-packages, so nothing would build-verify it"
@@ -254,7 +260,7 @@ runs:
         for package in $PACKAGES; do
           # Architecture-only crates (e.g. the wasm/rv32 runtimes) can't build
           # for the host; they are verified by the per-target steps below.
-          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+          if printf ' %s ' "$ARCH_ONLY_PACKAGES" | tr -s '[:space:]' ' ' | grep -qF " $package "; then
             echo "Skipping $package on host (architecture-only; verified on its target)"
             continue
           fi
@@ -400,7 +406,7 @@ runs:
         for package in $PACKAGES; do
           # Architecture-only crates can't build for the host; clippy on their
           # target is covered by the per-target cargo-hack verify steps above.
-          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+          if printf ' %s ' "$ARCH_ONLY_PACKAGES" | tr -s '[:space:]' ' ' | grep -qF " $package "; then
             echo "SKIP: Package $package is architecture-only, skipping host clippy"
             continue
           fi
@@ -491,7 +497,7 @@ runs:
         for package in $PACKAGES; do
           # Architecture-only crates can't build for the host; their docs are
           # not part of the publish gate (per-target verify covers them).
-          if echo " $ARCH_ONLY_PACKAGES " | grep -qF " $package "; then
+          if printf ' %s ' "$ARCH_ONLY_PACKAGES" | tr -s '[:space:]' ' ' | grep -qF " $package "; then
             echo "SKIP: Package $package is architecture-only, skipping host documentation build"
             continue
           fi

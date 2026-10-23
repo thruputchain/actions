@@ -24,6 +24,9 @@ package cratesio '["crates-io"]'
 package private '["thruput"]'
 package tabled '["tabled-reg"]'
 package quoted '["quoted-reg"]'
+package singlequoted '["sq-reg"]'
+package indented '["ind-reg"]'
+package quotedkey '["qk-reg"]'
 package gitindex '["gitreg"]'
 package noindex '["elsewhere"]'
 package several '["thruput", "crates-io"]'
@@ -31,7 +34,7 @@ package unpublished 'false'
 cat > "$WS/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "2"
-members = ["unset", "cratesio", "private", "tabled", "quoted", "gitindex", "noindex", "several", "unpublished"]
+members = ["unset", "cratesio", "private", "tabled", "quoted", "singlequoted", "indented", "quotedkey", "gitindex", "noindex", "several", "unpublished"]
 EOF
 mkdir -p "$WS/.cargo"
 cat > "$WS/.cargo/config.toml" <<'EOF'
@@ -39,6 +42,9 @@ cat > "$WS/.cargo/config.toml" <<'EOF'
 thruput = { index = "sparse+https://crates.example.net/api/v1/crates" }
 gitreg = { index = "https://github.com/example/index" }
 thruput-decoy = { index = "sparse+https://decoy.example.net/" }
+sq-reg = { index = 'sparse+https://sq.example.net/index/' }
+  ind-reg = { index = "sparse+https://ind.example.net/index/" }
+"qk-reg" = { "index" = "sparse+https://qk.example.net/index/" }
 
 # The table form, as cargo's docs show it. The decoy tables must not be
 # read for tabled-reg.
@@ -78,6 +84,9 @@ check "publish crates-io is crates.io"       "crates-io https://index.crates.io/
 check "named registry from config.toml"      "thruput https://crates.example.net/api/v1/crates/" "$(resolve private)"
 check "table-form registry from config.toml" "tabled-reg https://tabled.example.net/index/" "$(resolve tabled)"
 check "spaced, quoted, commented header"     "quoted-reg https://quoted.example.net/index/" "$(resolve quoted)"
+check "single-quoted index string"           "sq-reg https://sq.example.net/index/" "$(resolve singlequoted)"
+check "indented inline table"                "ind-reg https://ind.example.net/index/" "$(resolve indented)"
+check "quoted inline keys"                   "qk-reg https://qk.example.net/index/" "$(resolve quotedkey)"
 check "config in a parent directory"         "parent-reg https://parent.example.net/index/" "$(resolve_nested parent)"
 check "env index overrides config.toml" \
   "thruput https://env.example.net/index/" \
