@@ -50,7 +50,7 @@ jobs:
 | `cargo-hack-wasm32-feature-options` | Feature options for cargo-hack on `wasm32-unknown-unknown` | No | `--feature-powerset` |
 | `cargo-hack-rv32-packages` | Space-separated packages to also verify for `riscv32im-unknown-none-elf`. Step skipped if empty. | No | `''` |
 | `cargo-hack-rv32-feature-options` | Feature options for cargo-hack on `riscv32im-unknown-none-elf` | No | `--feature-powerset` |
-| `arch-only-packages` | Space-separated packages that only build for a non-host target. Still packaged, but skipped by the host verify, clippy, and doc steps; list them in a per-target input instead. | No | `''` |
+| `arch-only-packages` | Space-separated packages that only build for a non-host target. Still packaged, but skipped by the host verify, clippy, and doc steps. Each must also appear in a per-target input, or the action fails rather than let it through unverified. | No | `''` |
 | `vendor-workspace-deps` | Space-separated workspace packages to package into `vendor/` first, without verifying or publishing them. Use when the validated packages depend on workspace crates that are already published. | No | `''` |
 | `skip-clippy` | Skip clippy checks | No | `false` |
 | `skip-fmt` | Skip formatting checks | No | `false` |

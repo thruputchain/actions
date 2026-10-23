@@ -82,6 +82,9 @@ runs:
         source "$HOME/.cargo/env"
         echo "Pre-vendoring workspace dependencies..."
         METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+        # Where cargo package writes the archive: the workspace's target
+        # directory, or CARGO_TARGET_DIR, not necessarily ./target.
+        TARGET_DIR=$(echo "$METADATA" | jq -r '.target_directory')
         for package in $VENDOR_DEPS; do
           echo "Packaging $package for vendoring..."
           cargo package --locked --no-verify --package "$package" \
@@ -93,7 +96,7 @@ runs:
           version=$(echo "$METADATA" | \
             jq -r --arg pkg "$package" '.packages[] | select(.name == $pkg) | .version')
 
-          tar xzf "target/package/${package}-${version}.crate" -C vendor/
+          tar xzf "$TARGET_DIR/package/${package}-${version}.crate" -C vendor/
           echo '{"files":{}}' > "vendor/$package-$version/.cargo-checksum.json"
           echo "OK: Pre-vendored $package ($version)"
         done
@@ -161,6 +164,9 @@ runs:
         source "$HOME/.cargo/env"
 
         METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
+        # Where cargo package writes the archive: the workspace's target
+        # directory, or CARGO_TARGET_DIR, not necessarily ./target.
+        TARGET_DIR=$(echo "$METADATA" | jq -r '.target_directory')
 
         # Pre-vendor stub for any package that has a dev-dependency on itself.
         # cargo package resolves all deps (including dev) against vendored sources,
@@ -208,7 +214,7 @@ runs:
           version=$(echo "$METADATA" | jq -r --arg pkg "$package" \
             '.packages[] | select(.name == $pkg) | .version')
 
-          path="target/package/${package}-${version}.crate"
+          path="$TARGET_DIR/package/${package}-${version}.crate"
           tar xzf "$path" -C vendor/
           echo '{"files":{}}' > "vendor/$package-$version/.cargo-checksum.json"
 
@@ -225,9 +231,25 @@ runs:
         CARGO_HACK_OPTIONS: ${{ inputs.cargo-hack-feature-options }}
         PACKAGES: ${{ steps.list-packages.outputs.packages }}
         ARCH_ONLY_PACKAGES: ${{ inputs.arch-only-packages }}
+        WASM32_PACKAGES: ${{ inputs.cargo-hack-wasm32-packages }}
+        RV32_PACKAGES: ${{ inputs.cargo-hack-rv32-packages }}
       run: |
         set -euo pipefail
         source "$HOME/.cargo/env"
+
+        # An architecture-only crate is build-verified only by a per-target
+        # step, so it must be listed for at least one target; otherwise it
+        # would pass this action without ever being compiled.
+        for package in $ARCH_ONLY_PACKAGES; do
+          case " $WASM32_PACKAGES $RV32_PACKAGES " in
+            *" $package "*) ;;
+            *)
+              echo "::error::arch-only package '$package' is in neither cargo-hack-wasm32-packages nor cargo-hack-rv32-packages, so nothing would build-verify it"
+              exit 1
+              ;;
+          esac
+        done
+
         echo "Verifying packages with cargo-hack ($CARGO_HACK_OPTIONS)..."
         for package in $PACKAGES; do
           # Architecture-only crates (e.g. the wasm/rv32 runtimes) can't build

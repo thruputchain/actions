@@ -180,16 +180,27 @@ class StepTests(unittest.TestCase):
             f'exec "{real_cargo}" "$@"\n'
         )
         (stub_dir / "cargo").chmod(0o755)
+        # The step sources "$HOME/.cargo/env", which puts the real cargo
+        # directory ahead of the stub whenever it is not already on PATH (as
+        # on hosted runners). Give the step a HOME whose env file is a no-op,
+        # and point cargo and rustup at their real homes so cargo still runs.
+        real_home = Path.home()
+        home = root / "home"
+        (home / ".cargo").mkdir(parents=True)
+        (home / ".cargo/env").write_text("# no-op: the test controls PATH\n")
         code, log, _ = self.run_step(
             "Publish to registry", root, {
                 "${{ inputs.registry-name }}": "thruput",
-                "${{ inputs.registry-token }}": "t",
+                "${{ inputs.registry-token }}": "test-token-value",
                 CARGO_TOML: "./Cargo.toml",
                 PACKAGES: "a b",
                 "${{ inputs.publish-delay-seconds }}": "0",
                 "${{ inputs.no-verify }}": "true",
             },
             extra_env={
+                "HOME": str(home),
+                "CARGO_HOME": os.environ.get("CARGO_HOME", str(real_home / ".cargo")),
+                "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(real_home / ".rustup")),
                 "PATH": f"{stub_dir}:{os.environ['PATH']}",
                 "STUB_PUBLISH_OUTPUT": cargo_publish_output,
                 "STUB_PUBLISH_EXIT": str(exit_code),
