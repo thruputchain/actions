@@ -35,9 +35,10 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
   fi
 
   # skip-if-published: the group was released from an earlier commit. That
-  # holds only if every crate is on crates.io and crates.io would receive
-  # the same crate from HEAD. Comparing the packages `cargo package` builds
-  # covers what a diff of the crate's directory misses: inherited
+  # holds only if every crate is on crates.io, published from the tag, and
+  # crates.io would receive the same crate from HEAD. Comparing the packages
+  # `cargo package` builds covers what a diff of the crate's directory
+  # misses: inherited
   # [workspace.package] and [workspace.dependencies] values, and files from
   # outside it (readme = "../README.md"); and it ignores workspace changes
   # that don't reach the crate. No lockfile: it doesn't affect a library's
@@ -68,6 +69,10 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
     packaged . "$pkg" "$cmp/head"
     if ! diff -r "$cmp/tag" "$cmp/head"; then
       echo "::error::$pkg changed since $TAG ($TAG_SHA) but its version was not bumped"
+      exit 1
+    fi
+    if ! published_from "$pkg" "$VERSION" "$TAG_SHA"; then
+      echo "::error::crates.io's $pkg@$VERSION isn't the one $TAG releases: check who published it"
       exit 1
     fi
   done

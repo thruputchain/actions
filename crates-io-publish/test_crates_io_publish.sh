@@ -17,13 +17,14 @@ trap 'kill "$MOCK_PID"; rm -rf "$TMP"' EXIT
 for _ in $(seq 50); do [ -s "$TMP/port" ] && break; sleep 0.1; done
 MOCK="http://127.0.0.1:$(cat "$TMP/port")"
 
-export CRATES_IO_API_URL="$MOCK/api/v1" CRATES_IO_INDEX_URL="$MOCK/index"
+export CRATES_IO_API_URL="$MOCK/api/v1" CRATES_IO_INDEX_URL="$MOCK/index" CRATES_IO_DL_URL="$MOCK/dl"
 export CRATES_IO_API_DELAY=0 RATE_LIMIT_WAIT=0 CARGO_NET_OFFLINE=true
 export GITHUB_REPOSITORY=o/r GITHUB_WORKFLOW_REF="o/r/.github/workflows/publish.yml@refs/heads/main"
 export ACTIONS_ID_TOKEN_REQUEST_URL="$MOCK/oidc?x=1" ACTIONS_ID_TOKEN_REQUEST_TOKEN=reqtok
 
 # cargo stub: publish and owner go to the mock (and insist on --registry
-# crates-io); everything else is the real cargo.
+# crates-io), publish uploading the .crate cargo package builds; everything
+# else is the real cargo.
 REAL_CARGO="$(command -v cargo)"
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/cargo" <<EOF
@@ -38,7 +39,10 @@ case "\$1" in
   publish)
     pkg=\$(sed -n 's/.* -p \([^ ]*\).*/\1/p' <<<"\$*")
     vers=\$("$REAL_CARGO" metadata --no-deps --format-version 1 | jq -r --arg p "\$pkg" '.packages[] | select(.name == \$p) | .version')
-    code=\$(jq -n --arg n "\$pkg" --arg v "\$vers" --arg t "\$CARGO_REGISTRY_TOKEN" '{name: \$n, vers: \$v, token: \$t}' \
+    "$REAL_CARGO" package --quiet --no-verify --allow-dirty -p "\$pkg" --target-dir "$TMP/stub-package" >&2
+    crate=\$(base64 -w0 "$TMP/stub-package/package/\$pkg-\$vers.crate")
+    code=\$(jq -n --arg n "\$pkg" --arg v "\$vers" --arg t "\$CARGO_REGISTRY_TOKEN" --arg c "\$crate" \
+        --arg s "\$(git rev-parse HEAD)" '{name: \$n, vers: \$v, token: \$t, crate: \$c, sha: \$s}' \
       | curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data @- "$MOCK/_test/publish")
     case "\$code" in
       200) echo "Uploaded \$pkg v\$vers" ;;
@@ -84,6 +88,21 @@ git -C "$WS" commit -qm base
 mock() { curl -sSf -o /dev/null -H 'Content-Type: application/json' --data "${2-}" "$MOCK/_test/$1"; }
 state() { curl -sSf "$MOCK/_test/state" | jq -c "$1"; }
 reset() { mock reset '{}'; mock seed '{"crates": {"zz-old": ["0.1.0"]}}'; }
+# seed_file <package> <version>: uploads, as <version> of <package>
+# published with an API token, the .crate cargo package builds from the
+# workspace as it stands.
+seed_file() {
+  (cd "$WS" && "$REAL_CARGO" package --quiet --no-verify --allow-dirty -p "$1" --target-dir "$TMP/seed-package")
+  mock seed "$(jq -n --arg p "$1" --arg v "$2" --arg c "$(base64 -w0 "$TMP/seed-package/package/$1-$2.crate")" \
+    '{files: {($p): {($v): $c}}}')"
+}
+# seed_tampered <package> <version>: as seed_file, from a changed lib.rs.
+seed_tampered() {
+  local src="$WS/${1#zz-}/src/lib.rs"
+  echo "// not from this repository" >> "$src"
+  seed_file "$1" "$2"
+  git -C "$WS" checkout -q -- "$src"
+}
 
 # run <check|publish> [VAR=value...]: runs the mode in the workspace; prints
 # its GITHUB_OUTPUT lines, then "exit <status>".
@@ -125,6 +144,8 @@ check "version published without a tag here" "exit 1" "$(result "$r")"
 reset
 mock seed '{"crates": {"zz-new": ["0.2.0"], "zz-old": ["0.1.0", "0.2.0"]}}'
 git -C "$WS" tag v0.2.0
+seed_file zz-new 0.2.0
+seed_file zz-old 0.2.0
 echo "// more" > "$WS/new/src/lib.rs"
 git -C "$WS" commit -qam "change zz-new"
 
@@ -132,6 +153,21 @@ r=$(run check PACKAGES=zz-old)
 check "tag on another commit fails by default" "exit 1" "$(result "$r")"
 r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
 check "unchanged published group skips" "exit 0 false" "$(result "$r") $(output "$r" release)"
+seed_tampered zz-old 0.2.0
+r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
+check "a published version that isn't the tag's fails the skip" "exit 1" "$(result "$r")"
+check "... because it differs from crates.io's" 1 "$(grep -c 'its contents differ from zz-old at this commit' "$TMP/last.log" || true)"
+seed_file zz-old 0.2.0
+trustpub() { # trustpub <commit>: zz-old 0.2.0's provenance, published from o/r at <commit>
+  mock seed "$(jq -n --arg s "$1" '{provenance: {"zz-old": {"0.2.0": {provider: "github", repository: "o/r", run_id: "1", sha: $s}}}}')"
+}
+trustpub "$(git -C "$WS" rev-parse v0.2.0)"
+r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
+check "a version trusted publishing released from the tag skips" "exit 0 false" "$(result "$r") $(output "$r" release)"
+trustpub "$(git -C "$WS" rev-parse HEAD)"
+r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
+check "a version trusted publishing released from another commit fails the skip" "exit 1" "$(result "$r")"
+mock seed '{"provenance": {"zz-old": {"0.2.0": null}}}'
 r=$(run check PACKAGES="zz-new zz-old" ON_EXISTING_TAG=skip-if-published)
 check "a changed crate without a bump fails the skip" "exit 1" "$(result "$r")"
 git -C "$WS" reset -q --hard HEAD~1
@@ -180,6 +216,12 @@ check "re-run uploads nothing" 0 \
   "$(grep -c '^Uploaded' "$TMP/last.log" || true)"
 check "re-run adds no publishers" '1 1' \
   "$(state '.crates["zz-new"].configs | length') $(state '.crates["zz-old"].configs | length')"
+seed_tampered zz-new 0.2.0
+r=$(run publish BOOTSTRAP_TOKEN=boot)
+check "re-run refuses a published version that isn't the tag's" "exit 1" "$(result "$r")"
+check "... because it differs from crates.io's" 1 "$(grep -c 'its contents differ from zz-new at this commit' "$TMP/last.log" || true)"
+check "refused re-run uploads nothing" 0 "$(grep -c '^Uploaded' "$TMP/last.log" || true)"
+seed_file zz-new 0.2.0
 
 # Next version, no bootstrap token: OIDC only.
 sed -i 's/^version = "0.2.0"/version = "0.2.1"/' "$WS/Cargo.toml"
@@ -191,6 +233,15 @@ check "next release publishes through OIDC alone" "exit 0" "$(result "$r")"
 check "0.2.1 published" '["0.2.0","0.2.1"] ["0.1.0","0.2.0","0.2.1"]' \
   "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
 check "every crate's OIDC token revoked" '{}' "$(state .oidc_tokens)"
+r=$(run publish GIT_TAG=v0.2.1)
+check "re-run skips versions trusted publishing released from the tag" "exit 0" "$(result "$r")"
+mock seed '{"provenance": {"zz-old": {"0.2.1": {"provider": "github", "repository": "o/r", "run_id": "2", "sha": "0000000000000000000000000000000000000000"}}}}'
+r=$(run publish GIT_TAG=v0.2.1)
+check "re-run refuses a version trusted publishing released from another commit" "exit 1" "$(result "$r")"
+check "... naming where it came from" 1 "$(grep -c 'published from github o/r at 0000000' "$TMP/last.log" || true)"
+mock seed '{"provenance": {"zz-old": {"0.2.1": {"provider": "github", "repository": "x/r", "run_id": "2", "sha": "'"$(git -C "$WS" rev-parse HEAD)"'"}}}}'
+r=$(run publish GIT_TAG=v0.2.1)
+check "re-run refuses a version trusted publishing released from another repository" "exit 1" "$(result "$r")"
 
 # A job outside the publishers' environment can't publish.
 mock seed '{"claims": {"environment": "other"}}'
@@ -206,6 +257,8 @@ reset
 mock seed '{"crates": {"zz-new": ["0.2.2"], "zz-old": ["0.1.0", "0.2.2"]}, "claims": {"environment": "release"},
   "configs": [{"crate": "zz-new", "repository_owner": "o", "repository_name": "r",
                "workflow_filename": "publish.yml", "environment": "staging"}]}'
+seed_file zz-new 0.2.2
+seed_file zz-old 0.2.2
 r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=boot)
 check "publisher in another environment gets one for this job's" '["staging","release"]' \
   "$(state '[.crates["zz-new"].configs[].environment]')"
@@ -213,6 +266,8 @@ check "publisher in another environment gets one for this job's" '["staging","re
 # A re-run whose publisher setup fails (token rejected) fails the run.
 reset
 mock seed '{"crates": {"zz-new": ["0.2.2"], "zz-old": ["0.1.0", "0.2.2"]}}'
+seed_file zz-new 0.2.2
+seed_file zz-old 0.2.2
 r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=bad)
 check "failed publisher setup fails a re-run" "exit 1" "$(result "$r")"
 

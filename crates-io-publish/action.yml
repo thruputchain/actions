@@ -1,5 +1,5 @@
 name: 'crates.io Publish'
-description: 'Publishes a group of same-version Rust crates to crates.io: creates crates that do not exist yet with a bootstrap token and registers their trusted publisher, publishes new versions through trusted publishing, and skips versions already published.'
+description: 'Publishes a group of same-version Rust crates to crates.io: creates crates that do not exist yet with a bootstrap token and registers their trusted publisher, publishes new versions through trusted publishing, and skips versions already published from the release tag.'
 author: 'Thruput Team'
 
 inputs:
@@ -21,8 +21,9 @@ inputs:
       check: what to do when the release tag already exists on another
       commit. "fail" (default): error out; a new commit needs a version bump.
       "skip-if-published": release=false (this commit doesn't release the
-      group) when every package's version is on crates.io and `cargo package`
-      builds the same crate as at the tag; otherwise error out.
+      group) when every package's version is on crates.io, published from the
+      tag, and `cargo package` builds the same crate as at the tag; otherwise
+      error out.
     required: false
     default: 'fail'
   git-tag:

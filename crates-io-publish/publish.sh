@@ -2,7 +2,8 @@
 # mode: publish. Publishes each package in PACKAGES, in order, from the
 # commit GIT_TAG marks:
 #
-#   - version already on crates.io: skipped, so a re-run resumes a release;
+#   - version already on crates.io: skipped, so a re-run resumes a release,
+#     once it's shown to come from this commit (else the run fails);
 #   - crate not on crates.io: created with BOOTSTRAP_TOKEN, CRATE_OWNERS
 #     invited, and this job's workflow registered as its trusted publisher;
 #   - otherwise: published through trusted publishing, with a crates.io
@@ -177,7 +178,11 @@ for pkg in $PACKAGES; do
     NAME=$(crates_io_name "$pkg")
   fi
   if [ -z "$NAME" ]; then
-    echo "SKIP: $pkg@$VERSION is already on crates.io"
+    if ! published_from "$pkg" "$VERSION" "$(git rev-parse HEAD)"; then
+      echo "::error::crates.io's $pkg@$VERSION isn't the one $GIT_TAG releases: check who published it"
+      exit 1
+    fi
+    echo "SKIP: $pkg@$VERSION is already on crates.io, published from $GIT_TAG"
   elif [ "$NAME" != missing ] && [ "$NAME" != "$pkg" ]; then
     echo "::error::crates.io already has a crate named '$NAME', which it treats as the same name as '$pkg'"
     exit 1
