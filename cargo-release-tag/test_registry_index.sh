@@ -23,6 +23,7 @@ package unset
 package cratesio '["crates-io"]'
 package private '["thruput"]'
 package tabled '["tabled-reg"]'
+package quoted '["quoted-reg"]'
 package gitindex '["gitreg"]'
 package noindex '["elsewhere"]'
 package several '["thruput", "crates-io"]'
@@ -30,7 +31,7 @@ package unpublished 'false'
 cat > "$WS/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "2"
-members = ["unset", "cratesio", "private", "tabled", "gitindex", "noindex", "several", "unpublished"]
+members = ["unset", "cratesio", "private", "tabled", "quoted", "gitindex", "noindex", "several", "unpublished"]
 EOF
 mkdir -p "$WS/.cargo"
 cat > "$WS/.cargo/config.toml" <<'EOF'
@@ -50,10 +51,25 @@ index = "sparse+https://tabled.example.net/index/"
 
 [registries.tabled-reg-decoy]
 index = "sparse+https://decoy2.example.net/"
+
+  [ registries . "quoted-reg" ]   # indented, spaced, quoted, commented
+  index = "sparse+https://quoted.example.net/index/"
+
+[registries.parent-reg]
+index = "sparse+https://parent.example.net/index/"
 EOF
+# A nested workspace with no .cargo of its own: cargo run from inside it
+# reads the config above, in the parent directory, and so must the probe.
+mkdir -p "$WS/nested/parent/src"
+: > "$WS/nested/parent/src/lib.rs"
+printf '[package]\nname = "parent"\nversion = "0.1.0"\nedition = "2021"\npublish = ["parent-reg"]\n' > "$WS/nested/parent/Cargo.toml"
+printf '[workspace]\nresolver = "2"\nmembers = ["parent"]\n' > "$WS/nested/Cargo.toml"
 
 resolve() { # resolve <package> [registry-name] -> "<registry> <index>" | "error"
   (cd "$WS" && bash "$SCRIPT" ./Cargo.toml "$@" 2>/dev/null) || echo error
+}
+resolve_nested() { # like resolve, from the nested workspace
+  (cd "$WS/nested" && bash "$SCRIPT" ./Cargo.toml "$@" 2>/dev/null) || echo error
 }
 
 # ---- The package's publish field picks the registry ----
@@ -61,6 +77,8 @@ check "publish unset is crates.io"           "crates-io https://index.crates.io/
 check "publish crates-io is crates.io"       "crates-io https://index.crates.io/" "$(resolve cratesio)"
 check "named registry from config.toml"      "thruput https://crates.example.net/api/v1/crates/" "$(resolve private)"
 check "table-form registry from config.toml" "tabled-reg https://tabled.example.net/index/" "$(resolve tabled)"
+check "spaced, quoted, commented header"     "quoted-reg https://quoted.example.net/index/" "$(resolve quoted)"
+check "config in a parent directory"         "parent-reg https://parent.example.net/index/" "$(resolve_nested parent)"
 check "env index overrides config.toml" \
   "thruput https://env.example.net/index/" \
   "$(CARGO_REGISTRIES_THRUPUT_INDEX=sparse+https://env.example.net/index resolve private)"
