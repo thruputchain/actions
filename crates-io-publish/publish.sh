@@ -12,7 +12,8 @@
 # Env: PACKAGES, GIT_TAG, TAG_PREFIX, BOOTSTRAP_TOKEN, CRATE_OWNERS,
 # PUBLISH_ARGS, GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF,
 # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN (from id-token: write), and
-# RATE_LIMIT_WAIT (seconds between 429 retries; default 120).
+# RATE_LIMIT_WAIT (seconds between 429 retries when the 429 doesn't say
+# when to retry; default 120).
 # Run tests: bash crates-io-publish/test_crates_io_publish.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -147,11 +148,14 @@ ensure_trusted_publisher() {
   echo "OK: $crate now trusts $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ in $ENVIRONMENT}"
 }
 
-# crates.io rate-limits new crates (a small burst, then one every few
-# minutes), so a 429 waits and retries instead of failing a first release
-# halfway. --registry: a [registry] default elsewhere must not redirect it.
+# crates.io rate-limits publishing (new crates: a burst of 5, then one every
+# 10 minutes; new versions: a burst of 30, then one a minute), so a 429 waits
+# and retries instead of failing a release halfway. The 429 says when to
+# retry ("Please try again after Thu, 23 Oct 2026 05:00:00 GMT"), and cargo
+# prints it; RATE_LIMIT_WAIT is the fallback when it can't be read.
+# --registry: a [registry] default elsewhere must not redirect it.
 publish() { # publish <package> <token>
-  local pkg="$1" token="$2" attempt output rc
+  local pkg="$1" token="$2" attempt output rc retry_at retry_epoch delay
   for attempt in $(seq 1 15); do
     rc=0
     # shellcheck disable=SC2086 # PUBLISH_ARGS is a list of flags
@@ -162,8 +166,16 @@ publish() { # publish <package> <token>
       return 0
     fi
     if grep -q 'status 429' <<<"$output" && [ "$attempt" -lt 15 ]; then
-      echo "crates.io rate limit (attempt $attempt); retrying in ${RATE_LIMIT_WAIT}s"
-      sleep "$RATE_LIMIT_WAIT"
+      retry_at=$(sed -n 's/.*try again after \([A-Z][a-z][a-z], [0-9][0-9] [A-Z][a-z][a-z] [0-9]\{4\} [0-9:]\{8\} GMT\).*/\1/p' <<<"$output" | head -n1)
+      if [ -n "$retry_at" ] && retry_epoch=$(date -u -d "$retry_at" +%s); then
+        delay=$((retry_epoch - $(date -u +%s) + 1))
+        [ "$delay" -gt 0 ] || delay=1
+        echo "crates.io rate limit (attempt $attempt); retrying after $retry_at, in ${delay}s"
+      else
+        delay="$RATE_LIMIT_WAIT"
+        echo "crates.io rate limit (attempt $attempt); retrying in ${delay}s"
+      fi
+      sleep "$delay"
       continue
     fi
     echo "::error::Failed to publish $pkg"

@@ -43,10 +43,16 @@ case "\$1" in
     crate=\$(base64 -w0 "$TMP/stub-package/package/\$pkg-\$vers.crate")
     code=\$(jq -n --arg n "\$pkg" --arg v "\$vers" --arg t "\$CARGO_REGISTRY_TOKEN" --arg c "\$crate" \
         --arg s "\$(git rev-parse HEAD)" '{name: \$n, vers: \$v, token: \$t, crate: \$c, sha: \$s}' \
-      | curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data @- "$MOCK/_test/publish")
+      | curl -sS -o "$TMP/stub-response" -w '%{http_code}' -H 'Content-Type: application/json' --data @- "$MOCK/_test/publish")
     case "\$code" in
       200) echo "Uploaded \$pkg v\$vers" ;;
-      429) echo "error: failed to publish to registry: the remote server responded with an error (status 429 Too Many Requests): slow down"; exit 101 ;;
+      429)
+        echo "error: failed to publish to registry at https://crates.io"
+        echo
+        echo "Caused by:"
+        echo "  the remote server responded with an error (status 429 Too Many Requests): \$(jq -r '.errors[0].detail' "$TMP/stub-response")"
+        exit 101
+        ;;
       *) echo "error: failed to publish (HTTP \$code)"; exit 101 ;;
     esac
     ;;
@@ -196,8 +202,10 @@ check "publish refuses a tag that doesn't match the version" "exit 1" "$(result 
 
 # zz-old already exists and was first published by hand (no publisher).
 reset
-mock seed '{"rate_limited": ["zz-new"], "claims": {"environment": "Release"}}'
+mock seed '{"rate_limited": ["zz-new"], "retry_after": 3, "claims": {"environment": "Release"}}'
+start=$(date +%s)
 r=$(run publish BOOTSTRAP_TOKEN=boot CRATE_OWNERS=github:o:team)
+waited=$(($(date +%s) - start))
 check "first release: creates, adopts and publishes" "exit 0" "$(result "$r")"
 check "both versions published" '["0.2.0"] ["0.1.0","0.2.0"]' \
   "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
@@ -207,6 +215,9 @@ check "zz-new created with the bootstrap token, after a 429" 2 \
   "$(state '[.log[] | select(.[1] == "/_test/publish" and .[3].name == "zz-new" and .[3].token == "boot")] | length')"
 check "zz-old published through OIDC" 1 \
   "$(state '[.log[] | select(.[1] == "/_test/publish" and .[3].name == "zz-old" and (.[3].token | startswith("oidc-")))] | length')"
+check "429 waits for the time crates.io gives" 1 \
+  "$(grep -cE 'retrying after [A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9:]{8} GMT, in [2-4]s' "$TMP/last.log" || true)"
+check "... and actually waits" true "$([ "$waited" -ge 2 ] && echo true || echo false)"
 check "owners invited" 1 "$(state '[.log[] | select(.[1] == "/_test/owner")] | length')"
 check "OIDC tokens revoked" '{}' "$(state .oidc_tokens)"
 

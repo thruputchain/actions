@@ -47,6 +47,14 @@ The content comparison also fails when the toolchain's cargo normalizes `Cargo.t
 from the cargo that published the version. When `skip-if-published` hits that for a group's
 token-published first version, bump that group's version.
 
+### Rate limits
+
+crates.io rate-limits publishing: new crates come in a burst of 5, then one every 10 minutes; new
+versions of existing crates, a burst of 30, then one a minute. When a publish gets a 429, the
+action waits until the time crates.io gives in the response ("Please try again after …") and
+retries, up to 15 attempts per crate, so a first release of more than five crates takes longer
+instead of failing halfway.
+
 ## Usage
 
 ```yaml
