@@ -8,9 +8,14 @@ For each package, in the order given:
 
 | On crates.io | What happens |
 |--------------|--------------|
-| Crate doesn't exist | Created with `bootstrap-token`. `crate-owners` are invited, the job's workflow is registered as the crate's trusted publisher, and trusted publishing is made required for its new versions (see `require-trusted-publishing`), so later releases need no stored token and API tokens can't publish it. |
+| Crate doesn't exist | Created with `bootstrap-token`. `crate-owners` are invited and the job's workflow is registered as the crate's trusted publisher, so later releases need no stored token. |
 | Crate exists, version doesn't | Published through trusted publishing: the job's GitHub OIDC token is exchanged for a crates.io token, used for that crate, then revoked. |
 | Version exists | Skipped, once it's shown to be this release (see below); otherwise the run fails. |
+
+With `bootstrap-token`, every crate in the group then also requires trusted publishing for new
+versions (see `require-trusted-publishing`), so API tokens can't publish it. A release without the
+token can't change that setting: a trusted-publishing token can only publish. So `check` fails on
+a crate that doesn't require it, before anything is tagged.
 
 ## Modes
 
@@ -25,7 +30,9 @@ The action runs twice in a release job, around [`cargo-release-tag`](../cargo-re
   - a version already on crates.io that doesn't come from the release tag (see below);
   - a new crate whose name crates.io already has. It treats `-`, `_` and case as the same, so
     `rpc_api` clashes with an existing `rpc-api`;
-  - a new crate without `bootstrap-token`.
+  - a new crate without `bootstrap-token`;
+  - an existing crate that doesn't require trusted publishing (see `require-trusted-publishing`),
+    unless this run publishes the group with `bootstrap-token`, which turns it on.
 - **`publish`**, from the tagged commit. It checks that `git-tag` points at HEAD and matches the
   packages' version, then publishes as above.
 
@@ -166,7 +173,7 @@ settings first.
 | `git-tag` | `publish`: the release tag; must point at HEAD | For `publish` | |
 | `bootstrap-token` | crates.io API token for creating crates (see Credentials) | While creating crates | |
 | `crate-owners` | `publish`: owners invited to each crate this run creates (`github:org:team` or a username) | No | |
-| `require-trusted-publishing` | `publish`: turn on "Require trusted publishing for all new versions" for each crate this run creates, after registering its trusted publisher; `false` leaves it off. A failure fails the run | No | `true` |
+| `require-trusted-publishing` | `true`: every crate must require trusted publishing for new versions ("Require trusted publishing for all new versions"). `check` fails on an existing crate that doesn't, unless this run publishes with `bootstrap-token`; `publish` with `bootstrap-token` turns it on for every crate in the group, after registering its trusted publisher. A failure fails the run. `false` checks and changes nothing | No | `true` |
 | `publish-args` | `publish`: extra `cargo publish` arguments, e.g. `--all-features` | No | |
 
 ## Outputs (`check`)

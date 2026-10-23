@@ -45,10 +45,12 @@ inputs:
     default: ''
   require-trusted-publishing:
     description: >-
-      publish: "true" (default) to turn on "Require trusted publishing for all
-      new versions" for each crate this run creates, once its trusted
-      publisher is registered, so crates.io refuses new versions published
-      with an API token. Uses bootstrap-token; "false" leaves the setting off.
+      "true" (default): every crate must require trusted publishing for new
+      versions ("Require trusted publishing for all new versions"), so only
+      its trusted publishers can publish it. check fails on an existing crate
+      that doesn't, unless this run publishes with bootstrap-token; publish
+      with bootstrap-token turns it on for every crate in the group, once its
+      trusted publisher is registered. "false" checks and changes nothing.
     required: false
     default: 'true'
   publish-args:
@@ -85,6 +87,7 @@ runs:
         TAG_PREFIX: ${{ inputs.tag-prefix }}
         ON_EXISTING_TAG: ${{ inputs.on-existing-tag }}
         BOOTSTRAP_TOKEN: ${{ inputs.bootstrap-token }}
+        REQUIRE_TRUSTED_PUBLISHING: ${{ inputs.require-trusted-publishing }}
       run: bash "$ACTION_PATH/check.sh"
 
     - name: Publish to crates.io
