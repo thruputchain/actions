@@ -6,6 +6,7 @@
 
 CRATES_IO_API_URL="${CRATES_IO_API_URL:-https://crates.io/api/v1}"
 CRATES_IO_INDEX_URL="${CRATES_IO_INDEX_URL:-https://index.crates.io}"
+CRATES_IO_DL_URL="${CRATES_IO_DL_URL:-https://static.crates.io/crates}"
 # crates.io asks API clients for at most one request per second.
 CRATES_IO_API_DELAY="${CRATES_IO_API_DELAY:-1}"
 USER_AGENT="thruputchain-actions/crates-io-publish (https://github.com/thruputchain/actions)"
@@ -54,6 +55,84 @@ on_index() {
       exit 1
       ;;
   esac
+}
+
+# published_from <package> <version> <commit>: whether <version> on
+# crates.io is this repository's <package> as of <commit>. A version found
+# there isn't necessarily this repository's: a release that died partway
+# leaves the names of crates it hadn't created yet to whoever claims them
+# first. A version published through trusted publishing must come from this
+# repository at <commit>. One published with an API token (a crate's first
+# version, created with the bootstrap token, or one published by hand)
+# records no source, so its contents must match the crate `cargo package`
+# builds from the working tree. Exits when crates.io can't be read.
+published_from() {
+  local pkg="$1" vers="$2" sha="$3" body code trustpub
+  body=$(mktemp)
+  code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
+    "$CRATES_IO_API_URL/crates/$pkg/$vers")
+  sleep "$CRATES_IO_API_DELAY"
+  if [ "$code" != 200 ] || ! trustpub=$(jq -c '.version | if has("trustpub_data") then .trustpub_data else error("no trustpub_data") end' "$body"); then
+    rm -f "$body"
+    echo "::error::crates.io lookup of $pkg@$vers failed (HTTP $code)"
+    exit 1
+  fi
+  rm -f "$body"
+  if [ "$trustpub" = null ]; then
+    if matches_published "$pkg" "$vers"; then
+      return 0
+    fi
+    echo "::error::$pkg@$vers on crates.io was published with an API token, and its contents differ from $pkg at this commit (a cargo version other than the one that published it can also make them differ)"
+    return 1
+  fi
+  if jq -e --arg r "${GITHUB_REPOSITORY,,}" --arg s "$sha" \
+      '.provider == "github" and (.repository | ascii_downcase) == $r and .sha == $s' <<<"$trustpub" >/dev/null; then
+    return 0
+  fi
+  echo "::error::$pkg@$vers on crates.io was published from $(jq -r '"\(.provider) \(.repository) at \(.sha)"' <<<"$trustpub"), not $GITHUB_REPOSITORY at $sha"
+  return 1
+}
+
+# matches_published <package> <version>: whether the crate `cargo package`
+# builds from the working tree has the same contents as <version> on
+# crates.io, after checking the download against the index's checksum. Left
+# out of the comparison: Cargo.lock (consumers of a library don't use it,
+# and packaging it needs every workspace dependency on crates.io already),
+# .cargo_vcs_info.json (the commit it came from) and Cargo.toml.orig (cargo
+# builds from the normalized Cargo.toml). Exits when the crate can't be
+# fetched or verified.
+matches_published() {
+  local pkg="$1" vers="$2" dir want got rc=0
+  dir=$(mktemp -d)
+  if ! want=$(curl -sSf "$CRATES_IO_INDEX_URL/$(index_path "$pkg")" \
+      | jq -er --arg v "$vers" 'select(.vers == $v) | .cksum'); then
+    echo "::error::Could not read the checksum of $pkg@$vers from the crates.io index"
+    exit 1
+  fi
+  if ! curl -sSfL -o "$dir/published.crate" "$CRATES_IO_DL_URL/$pkg/$pkg-$vers.crate"; then
+    echo "::error::Could not download $pkg@$vers from crates.io"
+    exit 1
+  fi
+  got=$(sha256sum "$dir/published.crate" | cut -d' ' -f1)
+  if [ "$got" != "$want" ]; then
+    echo "::error::The download of $pkg@$vers has sha256 $got, but the crates.io index lists $want"
+    exit 1
+  fi
+  if ! cargo package --quiet --locked --no-verify --allow-dirty --exclude-lockfile \
+      -p "$pkg" --target-dir "$dir/target"; then
+    echo "::error::cargo package failed for $pkg"
+    exit 1
+  fi
+  mkdir "$dir/local" "$dir/published"
+  if ! tar -xzf "$dir/target/package/$pkg-$vers.crate" -C "$dir/local" --strip-components=1 ||
+    ! tar -xzf "$dir/published.crate" -C "$dir/published" --strip-components=1; then
+    echo "::error::Could not unpack $pkg@$vers to compare it"
+    exit 1
+  fi
+  rm -f "$dir"/{local,published}/{Cargo.lock,.cargo_vcs_info.json,Cargo.toml.orig}
+  diff -r "$dir/published" "$dir/local" || rc=1
+  rm -rf "$dir"
+  return "$rc"
 }
 
 # crates_io_name <crate>: "missing", or the name crates.io knows the crate

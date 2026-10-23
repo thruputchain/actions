@@ -119,7 +119,7 @@ See [cargo-yank/README.md](./cargo-yank/README.md) for detailed documentation.
 Publishes a group of same-version crates to crates.io, and is safe to re-run. Crates that don't exist
 yet are created with a bootstrap token, which also registers the calling workflow as their trusted
 publisher. New versions of existing crates publish through trusted publishing (GitHub OIDC), with no
-stored token. Versions already published are skipped.
+stored token. Versions already published are skipped, once shown to come from the release tag.
 
 It runs in two modes around `cargo-release-tag`: `check` decides whether this commit releases the
 group and verifies everything publishing would reject, before anything is tagged; `publish` then

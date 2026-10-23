@@ -10,7 +10,7 @@ For each package, in the order given:
 |--------------|--------------|
 | Crate doesn't exist | Created with `bootstrap-token`. `crate-owners` are invited and the job's workflow is registered as the crate's trusted publisher, so later releases need no stored token. |
 | Crate exists, version doesn't | Published through trusted publishing: the job's GitHub OIDC token is exchanged for a crates.io token, used for that crate, then revoked. |
-| Version exists | Skipped. |
+| Version exists | Skipped, once it's shown to be this release (see below); otherwise the run fails. |
 
 ## Modes
 
@@ -22,6 +22,7 @@ The action runs twice in a release job, around [`cargo-release-tag`](../cargo-re
     different versions;
   - a release tag already on another commit (see `on-existing-tag`);
   - a version already on crates.io with no release tag here;
+  - a version already on crates.io that doesn't come from the release tag (see below);
   - a new crate whose name crates.io already has. It treats `-`, `_` and case as the same, so
     `rpc_api` clashes with an existing `rpc-api`;
   - a new crate without `bootstrap-token`.
@@ -29,6 +30,31 @@ The action runs twice in a release job, around [`cargo-release-tag`](../cargo-re
   packages' version, then publishes as above.
 
 A failed `check` leaves nothing tagged, so the fix can be released from a new commit.
+
+### Skipping a version that's already published
+
+A version on crates.io isn't necessarily this repository's: a release that dies partway leaves the
+names of crates it hadn't created yet to whoever claims them first. So before either mode skips a
+version, it checks where the version came from:
+
+- **Published through trusted publishing:** crates.io records the repository and commit. They must
+  be this repository and the release tag's commit.
+- **Published with an API token** (a crate's first version, created with `bootstrap-token`, or one
+  published by hand): crates.io records no source. The `.crate` is downloaded, checked against the
+  index's checksum, and compared with what `cargo package` builds here, ignoring `Cargo.lock`,
+  `.cargo_vcs_info.json` and `Cargo.toml.orig`.
+
+The content comparison also fails when the toolchain's cargo normalizes `Cargo.toml` differently
+from the cargo that published the version. When `skip-if-published` hits that for a group's
+token-published first version, bump that group's version.
+
+### Rate limits
+
+crates.io rate-limits publishing: new crates come in a burst of 5, then one every 10 minutes; new
+versions of existing crates, a burst of 30, then one a minute. When a publish gets a 429, the
+action waits until the time crates.io gives in the response ("Please try again after …") and
+retries, up to 15 attempts per crate, so a first release of more than five crates takes longer
+instead of failing halfway.
 
 ## Usage
 
@@ -131,7 +157,7 @@ the token.
 | `mode` | `check` or `publish` (see Modes) | Yes | |
 | `packages` | Space-separated packages in dependency order, all at one version | Yes | |
 | `tag-prefix` | Release tag prefix: the tag is `<tag-prefix><version>` | No | `v` |
-| `on-existing-tag` | `check`: `fail`, or `skip-if-published` to report `release=false` when the tag is on another commit and every crate there is published and unchanged (`cargo package` builds the same crate) | No | `fail` |
+| `on-existing-tag` | `check`: `fail`, or `skip-if-published` to report `release=false` when the tag is on another commit and every crate there is published from the tag (see above) and unchanged (`cargo package` builds the same crate) | No | `fail` |
 | `git-tag` | `publish`: the release tag; must point at HEAD | For `publish` | |
 | `bootstrap-token` | crates.io API token for creating crates (see Credentials) | While creating crates | |
 | `crate-owners` | `publish`: owners invited to each crate this run creates (`github:org:team` or a username) | No | |

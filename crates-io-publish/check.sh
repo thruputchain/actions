@@ -35,9 +35,10 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
   fi
 
   # skip-if-published: the group was released from an earlier commit. That
-  # holds only if every crate is on crates.io and crates.io would receive
-  # the same crate from HEAD. Comparing the packages `cargo package` builds
-  # covers what a diff of the crate's directory misses: inherited
+  # holds only if every crate is on crates.io, published from the tag, and
+  # crates.io would receive the same crate from HEAD. Comparing the packages
+  # `cargo package` builds covers what a diff of the crate's directory
+  # misses: inherited
   # [workspace.package] and [workspace.dependencies] values, and files from
   # outside it (readme = "../README.md"); and it ignores workspace changes
   # that don't reach the crate. No lockfile: it doesn't affect a library's
@@ -70,6 +71,10 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
       echo "::error::$pkg changed since $TAG ($TAG_SHA) but its version was not bumped"
       exit 1
     fi
+    if ! published_from "$pkg" "$VERSION" "$TAG_SHA"; then
+      echo "::error::crates.io's $pkg@$VERSION isn't the one $TAG releases: check who published it"
+      exit 1
+    fi
   done
   echo "::notice::$TAG is already released from $TAG_SHA and nothing changed since; this commit doesn't release it"
   echo "release=false" >> "$GITHUB_OUTPUT"
@@ -89,12 +94,19 @@ for pkg in $PACKAGES; do
     echo "::error::crates.io already has a crate named '$name', which it treats as the same name as '$pkg'"
     exit 1
   fi
-  # A re-run of a release commit finds its own versions published; without
-  # the tag, the version was released from somewhere else.
-  if [ -z "$TAG_SHA" ] && on_index "$pkg" "$VERSION"; then
-    echo "::error::$pkg@$VERSION is already on crates.io but $TAG does not exist in this repository"
-    echo "::error::Bump the version to release it from here"
-    exit 1
+  # A re-run of a release commit finds its own versions published, and
+  # publish will skip them, so they must be this commit's; without the tag,
+  # the version was released from somewhere else.
+  if on_index "$pkg" "$VERSION"; then
+    if [ -z "$TAG_SHA" ]; then
+      echo "::error::$pkg@$VERSION is already on crates.io but $TAG does not exist in this repository"
+      echo "::error::Bump the version to release it from here"
+      exit 1
+    fi
+    if ! published_from "$pkg" "$VERSION" "$HEAD_SHA"; then
+      echo "::error::crates.io's $pkg@$VERSION isn't the one $TAG releases: check who published it"
+      exit 1
+    fi
   fi
   echo "OK: $pkg exists on crates.io"
 done

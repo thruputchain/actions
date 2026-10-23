@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mock crates.io for test_crates_io_publish.sh: the API, sparse index,
-trusted publishing endpoints and GitHub's OIDC token endpoint.
+downloads, trusted publishing endpoints and GitHub's OIDC token endpoint.
 
 Usage: mock_crates_io.py <port-file>. Listens on a free local port and
 writes it to <port-file>. The cargo stub uploads through /_test/publish;
@@ -9,8 +9,10 @@ Bootstrap token: "boot". Anything else is rejected.
 """
 
 import base64
+import hashlib
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -18,12 +20,19 @@ BOOTSTRAP = "boot"
 
 # canonical crate key (lower case, _ as -) -> {name, versions, configs}
 crates = {}
+# (name, version) -> the .crate file uploaded for it
+files = {}
+# (name, version) -> an index checksum that overrides the file's own
+cksums = {}
+# (name, version) -> its trustpub_data: None when published with an API token
+provenance = {}
 # GitHub OIDC claims the job's tokens carry
 claims = {"repository": "o/r", "repository_owner_id": "1",
           "workflow_ref": "o/r/.github/workflows/publish.yml@refs/heads/main",
           "environment": None}
 oidc_tokens = {}  # crates.io trusted publishing token -> allowed crate keys
 rate_limited = set()  # crate keys whose next new-crate publish gets a 429
+retry_after = 0  # seconds from now the 429 says to retry after
 log = []
 
 
@@ -78,6 +87,13 @@ class Handler(BaseHTTPRequestHandler):
             if auth != "Bearer reqtok" or query.get("audience") != ["crates.io"]:
                 return self.error(401, "bad OIDC request")
             return self.reply(200, {"value": jwt()})
+        if url.path.startswith("/api/v1/crates/") and url.path.count("/") == 5:
+            _, _, _, _, name, vers = url.path.split("/")
+            crate = crates.get(key(name))
+            if not crate or vers not in crate["versions"]:
+                return self.error(404, "not found")
+            return self.reply(200, {"version": {"num": vers,
+                                                "trustpub_data": provenance.get((crate["name"], vers))}})
         if url.path.startswith("/api/v1/crates/"):
             crate = crates.get(key(url.path.rsplit("/", 1)[1]))
             if not crate:
@@ -88,13 +104,25 @@ class Handler(BaseHTTPRequestHandler):
             crate = crates.get(key(name))
             if not crate or crate["name"].lower() != name:
                 return self.error(404, "not found")
-            lines = "".join(json.dumps({"name": crate["name"], "vers": v}) + "\n"
-                            for v in sorted(crate["versions"]))
+            lines = "".join(json.dumps({"name": crate["name"], "vers": v,
+                                        "cksum": cksums.get((crate["name"], v)) or
+                                        hashlib.sha256(files.get((crate["name"], v), b"")).hexdigest()})
+                            + "\n" for v in sorted(crate["versions"]))
             body = lines.encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return None
+        if url.path.startswith("/dl/"):
+            _, _, name, file = url.path.split("/")
+            data = files.get((name, file.removeprefix(name + "-").removesuffix(".crate")))
+            if data is None:
+                return self.error(404, "not found")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return None
         if url.path == "/api/v1/trusted_publishing/github_configs":
             if auth != BOOTSTRAP:
@@ -109,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.error(404, "no route")
 
     def do_POST(self):
+        global retry_after
         url = urlparse(self.path)
         auth = self.headers.get("Authorization")
         body = self.read_json()
@@ -133,12 +162,19 @@ class Handler(BaseHTTPRequestHandler):
             token = body["token"]
             if k in rate_limited and k not in crates:
                 rate_limited.discard(k)
-                return self.error(429, "You have published too many new crates")
+                retry_at = time.gmtime(time.time() + retry_after)
+                return self.error(429, "You have published too many new crates in a short period of time. "
+                                  f"Please try again after {time.strftime('%a, %d %b %Y %H:%M:%S GMT', retry_at)} "
+                                  "and see https://crates.io/docs/rate-limits for more details.")
             if token == BOOTSTRAP:
                 crates.setdefault(k, {"name": body["name"], "versions": set(), "configs": []})
             elif k not in oidc_tokens.get(token, []):
                 return self.error(403, "this token can't publish " + body["name"])
             crates[k]["versions"].add(body["vers"])
+            files[(body["name"], body["vers"])] = base64.b64decode(body["crate"])
+            provenance[(body["name"], body["vers"])] = None if token == BOOTSTRAP else {
+                "provider": "github", "repository": claims["repository"],
+                "run_id": "1", "sha": body["sha"]}
             return self.reply(200, {})
         if url.path == "/_test/owner":
             if auth != BOOTSTRAP:
@@ -149,14 +185,28 @@ class Handler(BaseHTTPRequestHandler):
                 crates[key(name)] = {"name": name, "versions": set(versions), "configs": []}
             for config in body.get("configs", []):
                 crates[key(config["crate"])]["configs"].append(config)
+            for name, versions in body.get("files", {}).items():
+                for vers, data in versions.items():
+                    files[(name, vers)] = base64.b64decode(data)
+            for name, versions in body.get("cksums", {}).items():
+                for vers, cksum in versions.items():
+                    cksums[(name, vers)] = cksum
+            for name, versions in body.get("provenance", {}).items():
+                for vers, data in versions.items():
+                    provenance[(name, vers)] = data
             for name in body.get("rate_limited", []):
                 rate_limited.add(key(name))
+            retry_after = body.get("retry_after", retry_after)
             claims.update(body.get("claims", {}))
             return self.reply(200, {})
         if url.path == "/_test/reset":
             crates.clear()
+            files.clear()
+            cksums.clear()
+            provenance.clear()
             oidc_tokens.clear()
             rate_limited.clear()
+            retry_after = 0
             log.clear()
             claims["environment"] = None
             return self.reply(200, {})
