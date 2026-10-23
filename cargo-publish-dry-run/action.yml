@@ -114,7 +114,8 @@ runs:
         
         if [ -n "$PACKAGES_INPUT" ]; then
           echo "Using provided packages list: $PACKAGES_INPUT"
-          PACKAGES="$PACKAGES_INPUT"
+          # One line: a YAML block input would otherwise break the GITHUB_OUTPUT write.
+          PACKAGES=$(printf '%s' "$PACKAGES_INPUT" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')
           
           # Validate that all provided packages exist and are publishable
           VALIDATION_FAILED=0

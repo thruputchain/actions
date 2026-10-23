@@ -37,14 +37,18 @@ index_path() {
 # (yanked or not). Exits when the index can't be read, so an outage is never
 # mistaken for "not published".
 on_index() {
-  local body code
+  local body code rc
   body=$(mktemp)
   code=$(curl -sS -o "$body" -w '%{http_code}' "$CRATES_IO_INDEX_URL/$(index_path "$1")")
   case "$code" in
     # Not grep -q: exiting at the first match can fail jq with SIGPIPE,
     # which pipefail would report as "not listed".
-    200) jq -r '.vers' "$body" | grep -xF "$2" >/dev/null ;;
-    404 | 410 | 451) return 1 ;;
+    200)
+      if jq -r '.vers' "$body" | grep -xF "$2" >/dev/null; then rc=0; else rc=1; fi
+      rm -f "$body"
+      return "$rc"
+      ;;
+    404 | 410 | 451) rm -f "$body"; return 1 ;;
     *)
       echo "::error::crates.io index probe for '$1' failed (HTTP $code)"
       exit 1
@@ -62,8 +66,8 @@ crates_io_name() {
     "$CRATES_IO_API_URL/crates/$1")
   sleep "$CRATES_IO_API_DELAY"
   case "$code" in
-    200) jq -r '.crate.name' "$body" ;;
-    404) echo missing ;;
+    200) jq -r '.crate.name' "$body"; rm -f "$body" ;;
+    404) rm -f "$body"; echo missing ;;
     *)
       echo "::error::crates.io lookup of '$1' failed (HTTP $code)" >&2
       return 1

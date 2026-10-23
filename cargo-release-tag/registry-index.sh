@@ -8,8 +8,14 @@
 # and must be one the package may publish to.
 #
 # A named registry's index comes from CARGO_REGISTRIES_<NAME>_INDEX when set
-# (as cargo reads it), else from an inline
-# `name = { index = "sparse+https://..." }` entry in .cargo/config.toml.
+# (as cargo reads it), else from .cargo/config.toml (or the legacy
+# .cargo/config) next to the manifest or in the working directory, written
+# either way:
+#   [registries]
+#   name = { index = "sparse+https://..." }
+# or
+#   [registries.name]
+#   index = "sparse+https://..."
 #
 # Usage: registry-index.sh <cargo-toml-path> <package> [registry-name]
 # Prints: <registry> <index-url-with-trailing-slash>
@@ -57,9 +63,26 @@ fi
 # cargo's environment form of registries.<name>.index: upper-cased, - to _.
 ENV_NAME="CARGO_REGISTRIES_$(printf '%s' "$REGISTRY" | tr '[:lower:]-' '[:upper:]_')_INDEX"
 INDEX="${!ENV_NAME-}"
-if [ -z "$INDEX" ] && [ -f .cargo/config.toml ]; then
-  INDEX=$(sed -n "s/^${REGISTRY} *= *{ *index *= *\"\([^\"]*\)\".*/\1/p" .cargo/config.toml | head -1)
-fi
+config_index() { # config_index <config file> -> the index for $REGISTRY, or nothing
+  # The inline table under [registries], or the first `index =` inside the
+  # [registries.<name>] table (and before the next table header). The name
+  # is compared literally, never as a pattern.
+  awk -v name="$REGISTRY" '
+    function unquote(s) { sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); return s }
+    /^[[:space:]]*\[/ {
+      registries = ($0 ~ /^[[:space:]]*\[registries\][[:space:]]*$/)
+      named = ($0 == "[registries." name "]")
+      next
+    }
+    registries && index($0, name) == 1 && substr($0, length(name) + 1) ~ /^[[:space:]]*=.*index[[:space:]]*=/ { print unquote($0); exit }
+    named && /^[[:space:]]*index[[:space:]]*=/ { print unquote($0); exit }
+  ' "$1"
+}
+MANIFEST_DIR=$(dirname "$MANIFEST")
+for cfg in "$MANIFEST_DIR/.cargo/config.toml" "$MANIFEST_DIR/.cargo/config" .cargo/config.toml .cargo/config; do
+  [ -n "$INDEX" ] && break
+  [ -f "$cfg" ] && INDEX=$(config_index "$cfg")
+done
 if [ -z "$INDEX" ]; then
   echo "::error::No index for registry '$REGISTRY': set $ENV_NAME or add it to .cargo/config.toml" >&2
   exit 1

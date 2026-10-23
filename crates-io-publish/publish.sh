@@ -58,7 +58,7 @@ github_jwt() {
     return 1
   fi
   jwt=$(curl -sSf -H @<(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
-    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io" | jq -r .value)
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io" | jq -er .value)
   echo "::add-mask::$jwt" >&2
   echo "$jwt"
 }
@@ -96,7 +96,8 @@ trap revoke_oidc EXIT
 exchange_oidc() {
   local jwt resp
   jwt=$(github_jwt)
-  resp=$(jq -n --arg jwt "$jwt" '{jwt: $jwt}' \
+  # The JWT reaches jq through the environment, not argv.
+  resp=$(JWT="$jwt" jq -n '{jwt: $ENV.JWT}' \
     | curl -sS -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" -H 'Content-Type: application/json' \
         --data @- "$API/trusted_publishing/tokens")
   if [ "$(status "$resp")" != 200 ]; then
@@ -104,7 +105,7 @@ exchange_oidc() {
     echo "::error::Add $GITHUB_REPOSITORY, workflow $WORKFLOW_FILE as a trusted publisher on crates.io, or pass bootstrap-token so this action adds it"
     exit 1
   fi
-  OIDC_TOKEN=$(body "$resp" | jq -r .token)
+  OIDC_TOKEN=$(body "$resp" | jq -er .token)
   echo "::add-mask::$OIDC_TOKEN"
 }
 

@@ -22,6 +22,7 @@ package() { # package <name> [publish TOML value]
 package unset
 package cratesio '["crates-io"]'
 package private '["thruput"]'
+package tabled '["tabled-reg"]'
 package gitindex '["gitreg"]'
 package noindex '["elsewhere"]'
 package several '["thruput", "crates-io"]'
@@ -29,13 +30,26 @@ package unpublished 'false'
 cat > "$WS/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "2"
-members = ["unset", "cratesio", "private", "gitindex", "noindex", "several", "unpublished"]
+members = ["unset", "cratesio", "private", "tabled", "gitindex", "noindex", "several", "unpublished"]
 EOF
 mkdir -p "$WS/.cargo"
 cat > "$WS/.cargo/config.toml" <<'EOF'
 [registries]
 thruput = { index = "sparse+https://crates.example.net/api/v1/crates" }
 gitreg = { index = "https://github.com/example/index" }
+thruput-decoy = { index = "sparse+https://decoy.example.net/" }
+
+# The table form, as cargo's docs show it. The decoy tables must not be
+# read for tabled-reg.
+[registries.other]
+index = "sparse+https://other.example.net/index/"
+
+[registries.tabled-reg]
+token = "unused"
+index = "sparse+https://tabled.example.net/index/"
+
+[registries.tabled-reg-decoy]
+index = "sparse+https://decoy2.example.net/"
 EOF
 
 resolve() { # resolve <package> [registry-name] -> "<registry> <index>" | "error"
@@ -46,6 +60,7 @@ resolve() { # resolve <package> [registry-name] -> "<registry> <index>" | "error
 check "publish unset is crates.io"           "crates-io https://index.crates.io/" "$(resolve unset)"
 check "publish crates-io is crates.io"       "crates-io https://index.crates.io/" "$(resolve cratesio)"
 check "named registry from config.toml"      "thruput https://crates.example.net/api/v1/crates/" "$(resolve private)"
+check "table-form registry from config.toml" "tabled-reg https://tabled.example.net/index/" "$(resolve tabled)"
 check "env index overrides config.toml" \
   "thruput https://env.example.net/index/" \
   "$(CARGO_REGISTRIES_THRUPUT_INDEX=sparse+https://env.example.net/index resolve private)"

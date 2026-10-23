@@ -88,11 +88,13 @@ python3 cargo-publish/test_action_steps.py
 ## Publishing
 
 The action:
-- Determines which packages to publish (from `packages` input or discovers all workspace packages)
+- Determines which packages to publish (from `packages` input, or every workspace package that
+  does not set `publish = false`)
 - Configures registry via environment variables (`CARGO_REGISTRIES_*_TOKEN`)
 - Masks the token in logs
 - Publishes each selected package individually using `cargo publish --registry <name> --package <package>`
-- Skips packages with `publish = false` in Cargo.toml
+- Skips packages with `publish = false` in Cargo.toml, and versions the registry reports as
+  already published (any other `cargo publish` failure fails the run)
 
 ## Example with Output
 

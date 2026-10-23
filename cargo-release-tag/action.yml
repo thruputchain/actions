@@ -89,7 +89,8 @@ runs:
 
         if [ -n "$PACKAGES_INPUT" ]; then
           echo "Validating specified packages: $PACKAGES_INPUT"
-          PACKAGES_TO_CHECK="$PACKAGES_INPUT"
+          # One line: a YAML block input would otherwise break the GITHUB_OUTPUT write.
+          PACKAGES_TO_CHECK=$(printf '%s' "$PACKAGES_INPUT" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')
 
           ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
           for package in $PACKAGES_TO_CHECK; do
@@ -100,7 +101,8 @@ runs:
           done
         else
           echo "Validating all workspace crate versions..."
-          PACKAGES_TO_CHECK=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+          # publish = false crates are skipped at publish time, so they need not share the version.
+          PACKAGES_TO_CHECK=$(echo "$METADATA" | jq -r '.packages[] | select(.publish != []) | .name' | tr '\n' ' ')
         fi
 
         MISMATCHED=false
@@ -243,6 +245,7 @@ runs:
         }
 
         ENTRY_FILE=$(mktemp)
+        trap 'rm -f "$ENTRY_FILE"' EXIT
         for pkg in $PACKAGES; do
           RESOLVED=$(bash "$ACTION_PATH/registry-index.sh" "$CARGO_TOML_PATH" "$pkg" "$REGISTRY_NAME")
           read -r REGISTRY INDEX_URL <<<"$RESOLVED"
@@ -259,7 +262,7 @@ runs:
               exit 1
               ;;
           esac
-          if ! grep -qx "$VERSION" <<<"$PUBLISHED"; then
+          if ! grep -qxF -- "$VERSION" <<<"$PUBLISHED"; then
             echo "::error::Tag $TAG points at $REMOTE_SHA (not this commit) but ${pkg}@${VERSION} is not in $REGISTRY."
             echo "::error::A previous release likely died between tag push and publish. Re-run from the tagged commit, or delete the stale tag; publishing from this commit would ship content that does not match the tag."
             exit 1

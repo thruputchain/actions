@@ -138,6 +138,29 @@ class StepTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         self.assertEqual(outputs["version"], "1.2.3")
 
+    def test_multi_line_packages_input_is_normalized(self):
+        # A YAML block input arrives with newlines; GITHUB_OUTPUT takes one line.
+        root = self.workspace("1.2.3", "1.2.3")
+        code, log, outputs = self.run_step(
+            "List workspace packages", root, {CARGO_TOML: "./Cargo.toml", PACKAGES_INPUT: "a\n  b\n"})
+        self.assertEqual(code, 0, log)
+        self.assertEqual(outputs["packages"], "a b")
+
+    def test_discovery_skips_publish_false_crates(self):
+        root = self.workspace("1.2.3", "1.2.3")
+        (root / "xtask/src").mkdir(parents=True)
+        (root / "xtask/src/main.rs").write_text("fn main() {}\n")
+        (root / "xtask/Cargo.toml").write_text(
+            '[package]\nname = "xtask"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n'
+        )
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "2"\nmembers = ["a", "b", "xtask"]\n'
+        )
+        code, log, outputs = self.run_step(
+            "List workspace packages", root, {CARGO_TOML: "./Cargo.toml", PACKAGES_INPUT: ""})
+        self.assertEqual(code, 0, log)
+        self.assertEqual(outputs["packages"].split(), ["a", "b"])
+
     def test_package_names_match_exactly(self):
         root = self.workspace("1.2.3", "1.2.3")
         code, log, outputs = self.run_step(
