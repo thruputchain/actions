@@ -22,6 +22,8 @@ BOOTSTRAP = "boot"
 crates = {}
 # (name, version) -> the .crate file uploaded for it
 files = {}
+# (name, version) -> an index checksum that overrides the file's own
+cksums = {}
 # (name, version) -> its trustpub_data: None when published with an API token
 provenance = {}
 # GitHub OIDC claims the job's tokens carry
@@ -103,7 +105,8 @@ class Handler(BaseHTTPRequestHandler):
             if not crate or crate["name"].lower() != name:
                 return self.error(404, "not found")
             lines = "".join(json.dumps({"name": crate["name"], "vers": v,
-                                        "cksum": hashlib.sha256(files.get((crate["name"], v), b"")).hexdigest()})
+                                        "cksum": cksums.get((crate["name"], v)) or
+                                        hashlib.sha256(files.get((crate["name"], v), b"")).hexdigest()})
                             + "\n" for v in sorted(crate["versions"]))
             body = lines.encode()
             self.send_response(200)
@@ -185,6 +188,9 @@ class Handler(BaseHTTPRequestHandler):
             for name, versions in body.get("files", {}).items():
                 for vers, data in versions.items():
                     files[(name, vers)] = base64.b64decode(data)
+            for name, versions in body.get("cksums", {}).items():
+                for vers, cksum in versions.items():
+                    cksums[(name, vers)] = cksum
             for name, versions in body.get("provenance", {}).items():
                 for vers, data in versions.items():
                     provenance[(name, vers)] = data
@@ -196,6 +202,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/_test/reset":
             crates.clear()
             files.clear()
+            cksums.clear()
             provenance.clear()
             oidc_tokens.clear()
             rate_limited.clear()

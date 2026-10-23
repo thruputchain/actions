@@ -237,6 +237,12 @@ check "re-run refuses a published version that isn't the tag's" "exit 1" "$(resu
 check "... because it differs from crates.io's" 1 "$(grep -c 'its contents differ from zz-new at this commit' "$TMP/last.log" || true)"
 check "refused re-run uploads nothing" 0 "$(grep -c '^Uploaded' "$TMP/last.log" || true)"
 seed_file zz-new 0.2.0
+mock seed '{"cksums": {"zz-new": {"0.2.0": "0000000000000000000000000000000000000000000000000000000000000000"}}}'
+r=$(run publish BOOTSTRAP_TOKEN=boot)
+check "re-run refuses a download that doesn't match the index checksum" "exit 1" "$(result "$r")"
+check "... as a checksum mismatch" 1 "$(grep -c 'but the crates.io index lists 0000' "$TMP/last.log" || true)"
+check "... uploading nothing" 0 "$(grep -c '^Uploaded' "$TMP/last.log" || true)"
+mock seed '{"cksums": {"zz-new": {"0.2.0": null}}}'
 
 # Next version, no bootstrap token: OIDC only.
 sed -i 's/^version = "0.2.0"/version = "0.2.1"/' "$WS/Cargo.toml"

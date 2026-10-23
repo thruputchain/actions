@@ -124,8 +124,11 @@ matches_published() {
     exit 1
   fi
   mkdir "$dir/local" "$dir/published"
-  tar -xzf "$dir/target/package/$pkg-$vers.crate" -C "$dir/local" --strip-components=1
-  tar -xzf "$dir/published.crate" -C "$dir/published" --strip-components=1
+  if ! tar -xzf "$dir/target/package/$pkg-$vers.crate" -C "$dir/local" --strip-components=1 ||
+    ! tar -xzf "$dir/published.crate" -C "$dir/published" --strip-components=1; then
+    echo "::error::Could not unpack $pkg@$vers to compare it"
+    exit 1
+  fi
   rm -f "$dir"/{local,published}/{Cargo.lock,.cargo_vcs_info.json,Cargo.toml.orig}
   diff -r "$dir/published" "$dir/local" || rc=1
   rm -rf "$dir"
