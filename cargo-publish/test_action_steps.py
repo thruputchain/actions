@@ -7,6 +7,7 @@ Run with Python + PyYAML, Cargo, git and jq:
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -35,9 +36,10 @@ class StepTests(unittest.TestCase):
     def setUpClass(cls):
         cls.steps = yaml.safe_load(ACTION.read_text())["runs"]["steps"]
 
-    def run_step(self, name, cwd, bindings):
+    def run_step(self, name, cwd, bindings, extra_env=None):
         step = next(step for step in self.steps if step["name"] == name)
         env = os.environ.copy()
+        env.update(extra_env or {})
         for var, expression in step["env"].items():
             env[var] = bindings[expression]
         env["GITHUB_OUTPUT"] = str(Path(cwd) / "github_output")
@@ -160,6 +162,66 @@ class StepTests(unittest.TestCase):
             "List workspace packages", root, {CARGO_TOML: "./Cargo.toml", PACKAGES_INPUT: ""})
         self.assertEqual(code, 0, log)
         self.assertEqual(outputs["packages"].split(), ["a", "b"])
+
+    def publish_with(self, cargo_publish_output, exit_code=101):
+        """Run the publish step with `cargo publish` stubbed to print the
+        given output and exit with exit_code; every other cargo subcommand
+        goes to the real cargo. Returns (step exit code, log)."""
+        root = self.workspace("1.2.3", "1.2.3")
+        real_cargo = shutil.which("cargo")
+        stub_dir = root / "stub-bin"
+        stub_dir.mkdir()
+        (stub_dir / "cargo").write_text(
+            "#!/usr/bin/env bash\n"
+            'if [ "$1" = publish ]; then\n'
+            '  printf \'%s\\n\' "$STUB_PUBLISH_OUTPUT"\n'
+            '  exit "$STUB_PUBLISH_EXIT"\n'
+            "fi\n"
+            f'exec "{real_cargo}" "$@"\n'
+        )
+        (stub_dir / "cargo").chmod(0o755)
+        code, log, _ = self.run_step(
+            "Publish to registry", root, {
+                "${{ inputs.registry-name }}": "thruput",
+                "${{ inputs.registry-token }}": "t",
+                CARGO_TOML: "./Cargo.toml",
+                PACKAGES: "a b",
+                "${{ inputs.publish-delay-seconds }}": "0",
+                "${{ inputs.no-verify }}": "true",
+            },
+            extra_env={
+                "PATH": f"{stub_dir}:{os.environ['PATH']}",
+                "STUB_PUBLISH_OUTPUT": cargo_publish_output,
+                "STUB_PUBLISH_EXIT": str(exit_code),
+            })
+        return code, log
+
+    def test_publish_skips_only_on_the_registry_version_exists_answer(self):
+        for message in (
+            "error: failed to publish to registry at https://example.invalid\n\n"
+            "Caused by:\n  the remote server responded with an error: crate version `1.2.3` is already uploaded",
+            "error: crate a@1.2.3 already exists on crates.io index",
+        ):
+            with self.subTest(message=message):
+                code, log = self.publish_with(message)
+                self.assertEqual(code, 0, log)
+                self.assertIn("SKIP: Package a version 1.2.3 is already published", log)
+                self.assertIn("Skipped: 2 package(s)", log)
+
+    def test_publish_does_not_skip_on_an_unrelated_already_exists(self):
+        # std's io::ErrorKind::AlreadyExists, as a build script or cargo
+        # itself may print it during the verify build.
+        code, log = self.publish_with(
+            "error: failed to verify package tarball\n\nCaused by:\n"
+            "  failed to create directory `/tmp/x`: entity already exists")
+        self.assertEqual(code, 101, log)
+        self.assertIn("::error::Failed to publish a version 1.2.3", log)
+        self.assertNotIn("SKIP", log)
+
+    def test_publish_success_is_counted(self):
+        code, log = self.publish_with("    Uploaded a v1.2.3", exit_code=0)
+        self.assertEqual(code, 0, log)
+        self.assertIn("Published: 2 package(s)", log)
 
     def test_package_names_match_exactly(self):
         root = self.workspace("1.2.3", "1.2.3")

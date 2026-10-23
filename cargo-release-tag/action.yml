@@ -71,9 +71,13 @@ runs:
 
         METADATA=$(cargo metadata --manifest-path "$CARGO_TOML_PATH" --format-version 1 --no-deps)
 
+        # One line: a YAML block input would otherwise break the GITHUB_OUTPUT
+        # write below, and the first-package pick here.
+        PACKAGES_INPUT=$(printf '%s' "$PACKAGES_INPUT" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')
+
         if [ -n "$PACKAGES_INPUT" ]; then
           # Use the first specified package's version as the reference
-          FIRST_PACKAGE=$(echo "$PACKAGES_INPUT" | awk '{print $1}')
+          FIRST_PACKAGE=${PACKAGES_INPUT%% *}
           ROOT_VERSION=$(echo "$METADATA" | jq -r --arg pkg "$FIRST_PACKAGE" \
             '.packages[] | select(.name == $pkg) | .version')
         else
@@ -91,8 +95,7 @@ runs:
 
         if [ -n "$PACKAGES_INPUT" ]; then
           echo "Validating specified packages: $PACKAGES_INPUT"
-          # One line: a YAML block input would otherwise break the GITHUB_OUTPUT write.
-          PACKAGES_TO_CHECK=$(printf '%s' "$PACKAGES_INPUT" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')
+          PACKAGES_TO_CHECK="$PACKAGES_INPUT"
 
           ALL_PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name')
           for package in $PACKAGES_TO_CHECK; do
