@@ -5,12 +5,14 @@
 #   - version already on crates.io: skipped, so a re-run resumes a release,
 #     once it's shown to come from this commit (else the run fails);
 #   - crate not on crates.io: created with BOOTSTRAP_TOKEN, CRATE_OWNERS
-#     invited, and this job's workflow registered as its trusted publisher;
+#     invited, this job's workflow registered as its trusted publisher, and
+#     (unless REQUIRE_TRUSTED_PUBLISHING=false) trusted publishing required
+#     for its new versions;
 #   - otherwise: published through trusted publishing, with a crates.io
 #     token exchanged from the job's GitHub OIDC token and revoked after.
 #
 # Env: PACKAGES, GIT_TAG, TAG_PREFIX, BOOTSTRAP_TOKEN, CRATE_OWNERS,
-# PUBLISH_ARGS, GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF,
+# REQUIRE_TRUSTED_PUBLISHING (default true), PUBLISH_ARGS, GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF,
 # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN (from id-token: write), and
 # RATE_LIMIT_WAIT (seconds between 429 retries when the 429 doesn't say
 # when to retry; default 120).
@@ -21,6 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 RATE_LIMIT_WAIT="${RATE_LIMIT_WAIT:-120}"
+REQUIRE_TRUSTED_PUBLISHING="${REQUIRE_TRUSTED_PUBLISHING:-true}"
 API="$CRATES_IO_API_URL"
 
 check_packages
@@ -148,6 +151,21 @@ ensure_trusted_publisher() {
   echo "OK: $crate now trusts $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ in $ENVIRONMENT}"
 }
 
+# Turns on $1's "Require trusted publishing for all new versions": crates.io
+# then refuses new versions published with an API token, so only its trusted
+# publishers can release it. Returns non-zero on failure.
+require_trusted_publishing() {
+  local crate="$1" resp
+  resp=$(jq -n '{crate: {trustpub_only: true}}' \
+    | api "$BOOTSTRAP_TOKEN" -X PATCH -H 'Content-Type: application/json' --data @- \
+        "$API/crates/$crate")
+  if [ "$(status "$resp")" != 200 ]; then
+    echo "::warning::Could not require trusted publishing for $crate (HTTP $(status "$resp")): $(detail "$resp")"
+    return 1
+  fi
+  echo "OK: $crate now requires trusted publishing for new versions"
+}
+
 # crates.io rate-limits publishing (new crates: a burst of 5, then one every
 # 10 minutes; new versions: a burst of 30, then one a minute), so a 429 waits
 # and retries instead of failing a release halfway. The 429 says when to
@@ -226,12 +244,19 @@ for pkg in $PACKAGES; do
   fi
 
   # Also on SKIP, so re-running a release whose first run died right after
-  # creating a crate still registers its publisher. A failure fails the run
-  # (after the remaining crates), so the bootstrap token isn't retired with
-  # a crate left unable to publish through OIDC.
-  if [ -n "$BOOTSTRAP_TOKEN" ] && [ "$ENSURED" = false ] && ! ensure_trusted_publisher "$pkg"; then
-    echo "::error::$pkg is published, but can't use trusted publishing until $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ (environment $ENVIRONMENT)} is added as its trusted publisher on crates.io"
-    FAILED=1
+  # creating a crate still registers its publisher and requirement. A
+  # failure fails the run (after the remaining crates), so the bootstrap
+  # token isn't retired with a crate left unable to publish through OIDC,
+  # or still open to API-token publishes. The requirement comes only after
+  # the publisher: with none, it would block every publish.
+  if [ -n "$BOOTSTRAP_TOKEN" ] && [ "$ENSURED" = false ]; then
+    if ! ensure_trusted_publisher "$pkg"; then
+      echo "::error::$pkg is published, but can't use trusted publishing until $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ (environment $ENVIRONMENT)} is added as its trusted publisher on crates.io"
+      FAILED=1
+    elif [ "$REQUIRE_TRUSTED_PUBLISHING" = true ] && ! require_trusted_publishing "$pkg"; then
+      echo "::error::$pkg still accepts new versions published with API tokens: tick \"Require trusted publishing for all new versions\" in its crates.io settings"
+      FAILED=1
+    fi
   fi
 done
 

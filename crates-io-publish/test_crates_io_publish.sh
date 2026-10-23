@@ -218,6 +218,8 @@ check "zz-old published through OIDC" 1 \
 check "429 waits for the time crates.io gives" 1 \
   "$(grep -cE 'retrying after [A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9:]{8} GMT, in [2-4]s' "$TMP/last.log" || true)"
 check "... and actually waits" true "$([ "$waited" -ge 2 ] && echo true || echo false)"
+check "trusted publishing required on the crate it created, not the adopted one" 'true false' \
+  "$(state '.crates["zz-new"].trustpub_only // false') $(state '.crates["zz-old"].trustpub_only // false')"
 check "owners invited" 1 "$(state '[.log[] | select(.[1] == "/_test/owner")] | length')"
 check "OIDC tokens revoked" '{}' "$(state .oidc_tokens)"
 
@@ -291,5 +293,20 @@ seed_file zz-new 0.2.2
 seed_file zz-old 0.2.2
 r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=bad)
 check "failed publisher setup fails a re-run" "exit 1" "$(result "$r")"
+
+# Creating a crate with require-trusted-publishing off leaves the setting alone.
+reset
+r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=boot REQUIRE_TRUSTED_PUBLISHING=false)
+check "require-trusted-publishing false creates the crate" "exit 0" "$(result "$r")"
+check "... without requiring trusted publishing" false "$(state '.crates["zz-new"].trustpub_only // false')"
+
+# A crate left accepting API-token publishes fails the run, after publishing.
+reset
+mock seed '{"reject_patch": true}'
+r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=boot)
+check "failing to require trusted publishing fails the run" "exit 1" "$(result "$r")"
+check "... once both crates are published" '["0.2.2"] ["0.1.0","0.2.2"]' \
+  "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
+check "... naming the setting to tick" 1 "$(grep -c 'still accepts new versions published with API tokens' "$TMP/last.log" || true)"
 
 exit "$FAILED"
