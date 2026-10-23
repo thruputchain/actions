@@ -185,7 +185,10 @@ jobs:
 ### rust-dependency-policy
 
 Runs `cargo deny check` against the caller's `deny.toml`, all four checks by default or the
-subset given in `checks`. Takes an optional private registry name and token.
+subset given in `checks`. Takes an optional private registry name and token, and an optional
+GitHub App for private git dependencies under the caller's owner: `git-app-id` and the
+`git-app-private-key` secret, with the repositories of the dependencies and of their submodules in
+`git-repositories`. The App's installation must cover those repositories; the token reads only them.
 
 ```yaml
 jobs:
