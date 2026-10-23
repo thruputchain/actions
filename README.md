@@ -189,6 +189,7 @@ subset given in `checks`. Takes an optional private registry name and token, and
 GitHub App for private git dependencies under the caller's owner: `git-app-id` and the
 `git-app-private-key` secret, with the repositories of the dependencies and of their submodules in
 `git-repositories`. The App's installation must cover those repositories; the token reads only them.
+`python3 .github/workflows/test_rust_dependency_policy.py` tests that input check and URL rewrite offline.
 
 ```yaml
 jobs:

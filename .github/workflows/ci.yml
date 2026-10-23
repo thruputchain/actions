@@ -52,6 +52,9 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: stable
         run: bash cargo-release-tag/test_registry_index.sh
+      - name: Test the dependency policy's git token offline
+        run: |
+          "$RUNNER_TEMP/registry-tests-env/bin/python" .github/workflows/test_rust_dependency_policy.py
 
   crates-io-publish:
     name: crates-io-publish against a mock crates.io
