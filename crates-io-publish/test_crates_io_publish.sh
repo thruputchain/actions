@@ -137,6 +137,19 @@ check "tag output" v0.2.0 "$(output "$r" tag)"
 r=$(run check BOOTSTRAP_TOKEN=boot ON_EXISTING_TAG=sometimes)
 check "unknown on-existing-tag" "exit 1" "$(result "$r")"
 
+# Existing crates must require trusted publishing (zz-old doesn't, after reset).
+r=$(run check PACKAGES=zz-old)
+check "existing crate open to API-token publishes fails the check" "exit 1" "$(result "$r")"
+check "... naming the setting to tick" 1 "$(grep -c 'Require trusted publishing for all new versions' "$TMP/last.log" || true)"
+r=$(run check PACKAGES=zz-old BOOTSTRAP_TOKEN=boot)
+check "... unless publish turns it on with bootstrap-token" "exit 0 true" "$(result "$r") $(output "$r" release)"
+r=$(run check PACKAGES=zz-old REQUIRE_TRUSTED_PUBLISHING=false)
+check "... or require-trusted-publishing is false" "exit 0" "$(result "$r")"
+mock seed '{"trustpub_only": ["zz-old"]}'
+r=$(run check PACKAGES=zz-old)
+check "existing crate requiring trusted publishing passes without a token" "exit 0 true" "$(result "$r") $(output "$r" release)"
+reset
+
 mock seed '{"crates": {"zz_new": []}}'
 r=$(run check BOOTSTRAP_TOKEN=boot)
 check "name held by zz_new on crates.io" "exit 1" "$(result "$r")"
@@ -148,7 +161,7 @@ check "version published without a tag here" "exit 1" "$(result "$r")"
 
 # Release 0.2.0 at the base commit, then move HEAD on.
 reset
-mock seed '{"crates": {"zz-new": ["0.2.0"], "zz-old": ["0.1.0", "0.2.0"]}}'
+mock seed '{"crates": {"zz-new": ["0.2.0"], "zz-old": ["0.1.0", "0.2.0"]}, "trustpub_only": ["zz-new", "zz-old"]}'
 git -C "$WS" tag v0.2.0
 seed_file zz-new 0.2.0
 seed_file zz-old 0.2.0
@@ -159,6 +172,11 @@ r=$(run check PACKAGES=zz-old)
 check "tag on another commit fails by default" "exit 1" "$(result "$r")"
 r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
 check "unchanged published group skips" "exit 0 false" "$(result "$r") $(output "$r" release)"
+mock seed '{"crates": {"zz-old": ["0.1.0", "0.2.0"]}}'
+seed_file zz-old 0.2.0
+r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published BOOTSTRAP_TOKEN=boot)
+check "a skipped group open to API-token publishes fails, token or not" "exit 1" "$(result "$r")"
+mock seed '{"trustpub_only": ["zz-old"]}'
 seed_tampered zz-old 0.2.0
 r=$(run check PACKAGES=zz-old ON_EXISTING_TAG=skip-if-published)
 check "a published version that isn't the tag's fails the skip" "exit 1" "$(result "$r")"
@@ -218,7 +236,7 @@ check "zz-old published through OIDC" 1 \
 check "429 waits for the time crates.io gives" 1 \
   "$(grep -cE 'retrying after [A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9:]{8} GMT, in [2-4]s' "$TMP/last.log" || true)"
 check "... and actually waits" true "$([ "$waited" -ge 2 ] && echo true || echo false)"
-check "trusted publishing required on the crate it created, not the adopted one" 'true false' \
+check "trusted publishing required on the crate it created and the one it adopted" 'true true' \
   "$(state '.crates["zz-new"].trustpub_only // false') $(state '.crates["zz-old"].trustpub_only // false')"
 check "owners invited" 1 "$(state '[.log[] | select(.[1] == "/_test/owner")] | length')"
 check "OIDC tokens revoked" '{}' "$(state .oidc_tokens)"
@@ -307,6 +325,6 @@ r=$(run publish GIT_TAG=v0.2.2 BOOTSTRAP_TOKEN=boot)
 check "failing to require trusted publishing fails the run" "exit 1" "$(result "$r")"
 check "... once both crates are published" '["0.2.2"] ["0.1.0","0.2.2"]' \
   "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
-check "... naming the setting to tick" 1 "$(grep -c 'still accepts new versions published with API tokens' "$TMP/last.log" || true)"
+check "... naming the setting to tick for each crate" 2 "$(grep -c 'still accepts new versions published with API tokens' "$TMP/last.log" || true)"
 
 exit "$FAILED"

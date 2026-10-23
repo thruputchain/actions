@@ -165,6 +165,26 @@ crates_io_name() {
   esac
 }
 
+# trustpub_required <crate>: whether an existing crate requires trusted
+# publishing for new versions ("Require trusted publishing for all new
+# versions"), from its public crates.io metadata. Exits when it can't be read.
+trustpub_required() {
+  local body code value
+  body=$(mktemp)
+  code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
+    "$CRATES_IO_API_URL/crates/$1")
+  sleep "$CRATES_IO_API_DELAY"
+  # Not jq -e: false is a valid answer here, and -e would fail on it.
+  value=$(jq -r '.crate.trustpub_only' "$body" 2>/dev/null || true)
+  if [ "$code" != 200 ] || { [ "$value" != true ] && [ "$value" != false ]; }; then
+    rm -f "$body"
+    echo "::error::Could not read whether $1 requires trusted publishing (HTTP $code)"
+    exit 1
+  fi
+  rm -f "$body"
+  [ "$value" = true ]
+}
+
 # check_packages: every package in PACKAGES exists, may publish to crates.io,
 # and shares one version, which it sets as VERSION.
 check_packages() {

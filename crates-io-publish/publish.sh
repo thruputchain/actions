@@ -5,11 +5,12 @@
 #   - version already on crates.io: skipped, so a re-run resumes a release,
 #     once it's shown to come from this commit (else the run fails);
 #   - crate not on crates.io: created with BOOTSTRAP_TOKEN, CRATE_OWNERS
-#     invited, this job's workflow registered as its trusted publisher, and
-#     (unless REQUIRE_TRUSTED_PUBLISHING=false) trusted publishing required
-#     for its new versions;
+#     invited, and this job's workflow registered as its trusted publisher;
 #   - otherwise: published through trusted publishing, with a crates.io
 #     token exchanged from the job's GitHub OIDC token and revoked after.
+#
+# With BOOTSTRAP_TOKEN, every crate then requires trusted publishing for new
+# versions too, unless REQUIRE_TRUSTED_PUBLISHING=false.
 #
 # Env: PACKAGES, GIT_TAG, TAG_PREFIX, BOOTSTRAP_TOKEN, CRATE_OWNERS,
 # REQUIRE_TRUSTED_PUBLISHING (default true), PUBLISH_ARGS, GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF,
@@ -243,17 +244,20 @@ for pkg in $PACKAGES; do
     ENSURED=true
   fi
 
-  # Also on SKIP, so re-running a release whose first run died right after
-  # creating a crate still registers its publisher and requirement. A
-  # failure fails the run (after the remaining crates), so the bootstrap
-  # token isn't retired with a crate left unable to publish through OIDC,
-  # or still open to API-token publishes. The requirement comes only after
-  # the publisher: with none, it would block every publish.
-  if [ -n "$BOOTSTRAP_TOKEN" ] && [ "$ENSURED" = false ]; then
-    if ! ensure_trusted_publisher "$pkg"; then
+  # With the token, every crate in the group ends with a trusted publisher
+  # and, unless REQUIRE_TRUSTED_PUBLISHING=false, requiring trusted
+  # publishing. Also on SKIP, so re-running a release whose first run died
+  # right after creating a crate finishes setting it up. A failure fails
+  # the run (after the remaining crates), so the bootstrap token isn't
+  # retired with a crate left unable to publish through OIDC, or still open
+  # to API-token publishes. The requirement comes only after the publisher:
+  # with none, it would block every publish.
+  if [ -n "$BOOTSTRAP_TOKEN" ]; then
+    if [ "$ENSURED" = false ] && ! ensure_trusted_publisher "$pkg"; then
       echo "::error::$pkg is published, but can't use trusted publishing until $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ (environment $ENVIRONMENT)} is added as its trusted publisher on crates.io"
       FAILED=1
-    elif [ "$REQUIRE_TRUSTED_PUBLISHING" = true ] && ! require_trusted_publishing "$pkg"; then
+    elif [ "$REQUIRE_TRUSTED_PUBLISHING" = true ] && ! trustpub_required "$pkg" \
+        && ! require_trusted_publishing "$pkg"; then
       echo "::error::$pkg still accepts new versions published with API tokens: tick \"Require trusted publishing for all new versions\" in its crates.io settings"
       FAILED=1
     fi

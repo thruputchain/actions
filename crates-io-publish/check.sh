@@ -3,13 +3,41 @@
 # the group, and verifies everything the tag and publish steps would reject,
 # so a failure here leaves no tag behind.
 #
-# Env: PACKAGES, TAG_PREFIX, ON_EXISTING_TAG, BOOTSTRAP_TOKEN, GITHUB_OUTPUT.
+# Env: PACKAGES, TAG_PREFIX, ON_EXISTING_TAG, BOOTSTRAP_TOKEN,
+# REQUIRE_TRUSTED_PUBLISHING (default true), GITHUB_OUTPUT.
 # Outputs: version, tag, release ("true"/"false"), new-crates.
 # Run tests: bash crates-io-publish/test_crates_io_publish.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
+
+REQUIRE_TRUSTED_PUBLISHING="${REQUIRE_TRUSTED_PUBLISHING:-true}"
+
+# check_trustpub_required <will-publish> <crate>...: every crate given, all
+# on crates.io, must require trusted publishing for new versions, so only
+# the release workflow can publish them. A crate that doesn't fails the
+# check, unless this run publishes it with bootstrap-token (<will-publish>
+# "true"), which turns the setting on; an OIDC-only run can't.
+check_trustpub_required() {
+  local will_publish="$1" pkg missing=""
+  shift
+  [ "$REQUIRE_TRUSTED_PUBLISHING" = true ] || return 0
+  for pkg in "$@"; do
+    if ! trustpub_required "$pkg"; then
+      missing="$missing $pkg"
+    fi
+  done
+  missing="${missing# }"
+  [ -n "$missing" ] || return 0
+  if [ "$will_publish" = true ] && [ -n "$BOOTSTRAP_TOKEN" ]; then
+    echo "::notice::$missing don't require trusted publishing yet; publish turns it on with bootstrap-token"
+    return 0
+  fi
+  echo "::error::$missing accept new versions published with API tokens"
+  echo "::error::Tick \"Require trusted publishing for all new versions\" in each crate's crates.io settings, or pass bootstrap-token (scope trusted-publishing) so publish turns it on"
+  exit 1
+}
 
 case "$ON_EXISTING_TAG" in
   fail | skip-if-published) ;;
@@ -76,6 +104,9 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
       exit 1
     fi
   done
+  # Nothing is published from here, so nothing can turn the setting on.
+  # shellcheck disable=SC2086 # PACKAGES is a list of names
+  check_trustpub_required false $PACKAGES
   echo "::notice::$TAG is already released from $TAG_SHA and nothing changed since; this commit doesn't release it"
   echo "release=false" >> "$GITHUB_OUTPUT"
   echo "new-crates=" >> "$GITHUB_OUTPUT"
@@ -83,6 +114,7 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
 fi
 
 NEW_CRATES=""
+EXISTING=""
 for pkg in $PACKAGES; do
   name=$(crates_io_name "$pkg")
   if [ "$name" = missing ]; then
@@ -109,6 +141,7 @@ for pkg in $PACKAGES; do
     fi
   fi
   echo "OK: $pkg exists on crates.io"
+  EXISTING="$EXISTING $pkg"
 done
 NEW_CRATES="${NEW_CRATES# }"
 
@@ -116,6 +149,9 @@ if [ -n "$NEW_CRATES" ] && [ -z "$BOOTSTRAP_TOKEN" ]; then
   echo "::error::Creating new crates ($NEW_CRATES) needs bootstrap-token: a crates.io API token with the scopes publish-new and trusted-publishing"
   exit 1
 fi
+
+# shellcheck disable=SC2086 # EXISTING is a list of names
+check_trustpub_required true $EXISTING
 
 echo "release=true" >> "$GITHUB_OUTPUT"
 echo "new-crates=$NEW_CRATES" >> "$GITHUB_OUTPUT"

@@ -99,7 +99,8 @@ class Handler(BaseHTTPRequestHandler):
             crate = crates.get(key(url.path.rsplit("/", 1)[1]))
             if not crate:
                 return self.error(404, "not found")
-            return self.reply(200, {"crate": {"name": crate["name"]}})
+            return self.reply(200, {"crate": {"name": crate["name"],
+                                              "trustpub_only": crate.get("trustpub_only", False)}})
         if url.path.startswith("/index/"):
             name = url.path.rsplit("/", 1)[1]
             crate = crates.get(key(name))
@@ -197,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
             for name, versions in body.get("provenance", {}).items():
                 for vers, data in versions.items():
                     provenance[(name, vers)] = data
+            for name in body.get("trustpub_only", []):
+                crates[key(name)]["trustpub_only"] = True
             for name in body.get("rate_limited", []):
                 rate_limited.add(key(name))
             retry_after = body.get("retry_after", retry_after)
