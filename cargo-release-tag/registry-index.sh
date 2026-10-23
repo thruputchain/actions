@@ -8,8 +8,15 @@
 # and must be one the package may publish to.
 #
 # A named registry's index comes from CARGO_REGISTRIES_<NAME>_INDEX when set
-# (as cargo reads it), else from an inline
-# `name = { index = "sparse+https://..." }` entry in .cargo/config.toml.
+# (as cargo reads it), else from the config files cargo itself would read:
+# .cargo/config.toml (or the legacy .cargo/config) in the working directory
+# and each of its parents, then $CARGO_HOME/config.toml, nearest first.
+# Either spelling is accepted:
+#   [registries]
+#   name = { index = "sparse+https://..." }
+# or
+#   [registries.name]
+#   index = "sparse+https://..."
 #
 # Usage: registry-index.sh <cargo-toml-path> <package> [registry-name]
 # Prints: <registry> <index-url-with-trailing-slash>
@@ -57,9 +64,39 @@ fi
 # cargo's environment form of registries.<name>.index: upper-cased, - to _.
 ENV_NAME="CARGO_REGISTRIES_$(printf '%s' "$REGISTRY" | tr '[:lower:]-' '[:upper:]_')_INDEX"
 INDEX="${!ENV_NAME-}"
-if [ -z "$INDEX" ] && [ -f .cargo/config.toml ]; then
-  INDEX=$(sed -n "s/^${REGISTRY} *= *{ *index *= *\"\([^\"]*\)\".*/\1/p" .cargo/config.toml | head -1)
-fi
+config_index() { # config_index <config file> -> the index for $REGISTRY, or nothing
+  # The inline table under [registries], or the first `index =` inside the
+  # [registries.<name>] table (and before the next table header). Headers
+  # are compared after dropping whitespace and trailing comments, with the
+  # name bare or quoted; the name itself is matched literally.
+  awk -v name="$REGISTRY" '
+    function unquote(s) { sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); return s }
+    function header(s) { sub(/[[:space:]]*#.*$/, "", s); gsub(/[[:space:]]/, "", s); return s }
+    /^[[:space:]]*\[/ {
+      h = header($0)
+      registries = (h == "[registries]")
+      named = (h == "[registries." name "]" || h == "[registries.\"" name "\"]")
+      next
+    }
+    registries && index($0, name) == 1 && substr($0, length(name) + 1) ~ /^[[:space:]]*=.*index[[:space:]]*=/ { print unquote($0); exit }
+    named && /^[[:space:]]*index[[:space:]]*=/ { print unquote($0); exit }
+  ' "$1"
+}
+# Walk the hierarchy cargo reads, nearest first, so the registry probed is
+# the one `cargo publish` run from this directory will use.
+dir=$PWD
+while :; do
+  for cfg in "$dir/.cargo/config.toml" "$dir/.cargo/config"; do
+    [ -n "$INDEX" ] && break 2
+    [ -f "$cfg" ] && INDEX=$(config_index "$cfg")
+  done
+  [ "$dir" = / ] && break
+  dir=$(dirname "$dir")
+done
+for cfg in "${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config"; do
+  [ -n "$INDEX" ] && break
+  [ -f "$cfg" ] && INDEX=$(config_index "$cfg")
+done
 if [ -z "$INDEX" ]; then
   echo "::error::No index for registry '$REGISTRY': set $ENV_NAME or add it to .cargo/config.toml" >&2
   exit 1

@@ -129,7 +129,8 @@ runs:
         
         if [ -n "$PACKAGES_INPUT" ]; then
           echo "Using provided packages list: $PACKAGES_INPUT"
-          PACKAGES="$PACKAGES_INPUT"
+          # One line: a YAML block input would otherwise break the GITHUB_OUTPUT write.
+          PACKAGES=$(printf '%s' "$PACKAGES_INPUT" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')
           
           # Validate that all provided packages exist and are publishable
           VALIDATION_FAILED=0
@@ -157,7 +158,8 @@ runs:
           fi
         else
           echo "Discovering workspace packages..."
-          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | .name' | tr '\n' ' ')
+          # publish = false crates are skipped at publish time, so they need not share the version.
+          PACKAGES=$(echo "$METADATA" | jq -r '.packages[] | select(.publish != []) | .name' | tr '\n' ' ')
         fi
 
         if [ -z "$PACKAGES" ]; then
@@ -431,9 +433,14 @@ runs:
               sleep "$PUBLISH_DELAY_SECONDS"
             fi
           else
-            # Check if the error is due to version already being uploaded
-            if echo "$PUBLISH_OUTPUT" | grep -q "is already uploaded\|already exists"; then
+            # Skip only on the registry's (or cargo's pre-upload index check's)
+            # own "this version exists" answer. A bare "already exists" is
+            # too loose: std's io::ErrorKind::AlreadyExists ("entity already
+            # exists") and several cargo errors contain it, and the verify
+            # build's output is part of what is matched here.
+            if grep -qE 'is already uploaded|crate [^ ]+@[^ ]+ already exists on .* index' <<<"$PUBLISH_OUTPUT"; then
               echo "SKIP: Package $package version $PACKAGE_VERSION is already published"
+              echo "$PUBLISH_OUTPUT"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
             else
               # This is a real error, fail the workflow

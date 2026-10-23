@@ -138,7 +138,9 @@ jobs:
           # Probe for the pyflakes *module*, not a console script: Ubuntu's
           # python3-pyflakes installs no pyflakes/pyflakes3 executable, so a
           # `command -v` probe reinstalls a present package and then fails.
-          have_pyflakes() { python3 -c 'import pyflakes' >/dev/null 2>&1; }
+          # -I (isolated): the checkout is the working directory, and without
+          # it Python would import a pyflakes.py or os.py found there.
+          have_pyflakes() { python3 -I -c 'import pyflakes' >/dev/null 2>&1; }
 
           # Check each backend independently: runner images commonly ship one
           # but not the other, and a combined guard would skip the install.
@@ -174,7 +176,7 @@ jobs:
           # actionlint's -pyflakes takes an executable; supply one when the
           # distro ships only the module.
           if ! command -v pyflakes >/dev/null 2>&1; then
-            printf '#!/bin/sh\nexec python3 -m pyflakes "$@"\n' > "$bin/pyflakes"
+            printf '#!/bin/sh\nexec python3 -I -m pyflakes "$@"\n' > "$bin/pyflakes"
             chmod +x "$bin/pyflakes"
           fi
 
@@ -192,7 +194,7 @@ jobs:
           install -m755 "$tmp/actionlint" "$tmp/zizmor" "$bin/"
           echo "$bin" >> "$GITHUB_PATH"
           shellcheck --version | head -2
-          python3 -m pyflakes --version
+          python3 -I -m pyflakes --version
           "$bin/actionlint" --version
           "$bin/zizmor" --version
 
@@ -211,8 +213,9 @@ jobs:
         env:
           # The App token reads only lint-app-repositories and is revoked by
           # the token action after the job. Callers without an App keep
-          # github.token.
-          GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
+          # github.token. Handed to zizmor alone (as GH_TOKEN) below, so the
+          # linters that run code from the checkout never see it.
+          LINT_GH_TOKEN: ${{ secrets.lint-token || steps.lint-app-token.outputs.token || github.token }}
           ZIZMOR_PEDANTIC: ${{ inputs.pedantic }}
           RUN_ZIZMOR: ${{ inputs.run-zizmor }}
           SHELLCHECK_SCRIPTS: ${{ inputs.shellcheck-scripts }}
@@ -222,11 +225,12 @@ jobs:
           # pyflakes only reaches steps declaring `shell: python`, so helper
           # scripts invoked from a bash run: block are invisible to
           # actionlint. Lint them directly, in module form so no console
-          # script need exist.
+          # script need exist. -I keeps the checkout (the working directory)
+          # off sys.path, so a module planted there cannot be imported.
           mapfile -t py_files < <(git ls-files '*.py')
           if [ ${#py_files[@]} -gt 0 ]; then
             printf 'pyflakes: %s\n' "${py_files[@]}"
-            python3 -m pyflakes "${py_files[@]}"
+            python3 -I -m pyflakes "${py_files[@]}"
           else
             echo "pyflakes: no python files"
           fi
@@ -282,13 +286,13 @@ jobs:
           # several. If zizmor changes all of them the match stops working
           # and CI fails, which is the safe direction.
           zcfg=()
-          if out="$(zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
+          if out="$(GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zizmor_inputs[@]}" 2>&1)"; then
             printf '%s\n' "$out"
           elif printf '%s' "$out" | grep -qE "'(impostor-commit|stale-action-refs|ref-version-mismatch|ref-confusion|known-vulnerable-actions)' audit failed" &&
                printf '%s' "$out" | grep -qE 'no access|403 Forbidden|401 Unauthorized|git-upload-pack'; then
             echo "::warning::zizmor could not read a referenced private repository, so impostor-commit, stale-action-refs, ref-version-mismatch, ref-confusion and known-vulnerable-actions were skipped. Supply a lint-token with Contents: read on that repository to restore them."
             fallback="$(mktemp)"
-            python3 - "$fallback" <<'PYEOF'
+            python3 -I - "$fallback" <<'PYEOF'
           import os, re, sys
 
           SKIP = ("impostor-commit", "stale-action-refs", "ref-version-mismatch",
@@ -307,7 +311,7 @@ jobs:
           open(sys.argv[1], "w").write(src.rstrip("\n") + "\n" + extra)
           PYEOF
             zcfg=(--config "$fallback")
-            zizmor --no-progress "${zcfg[@]}" "${zizmor_inputs[@]}"
+            GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zcfg[@]}" "${zizmor_inputs[@]}"
           else
             printf '%s\n' "$out"
             exit 1
@@ -315,5 +319,5 @@ jobs:
 
           if [ "$ZIZMOR_PEDANTIC" = "true" ]; then
             echo "--- pedantic pass (advisory only) ---"
-            zizmor --no-progress "${zcfg[@]}" --persona=pedantic "${zizmor_inputs[@]}" || true
+            GH_TOKEN="$LINT_GH_TOKEN" zizmor --no-progress "${zcfg[@]}" --persona=pedantic "${zizmor_inputs[@]}" || true
           fi

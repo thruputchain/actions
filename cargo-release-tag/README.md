@@ -103,8 +103,9 @@ Independently-versioned crate that doesn't bump every release:
 - Rust toolchain, `jq`, and `curl` on the runner
 - Repository checked out at the commit to release, run from the repo root
 - For `skip-if-published` with a private registry: its sparse index in
-  `CARGO_REGISTRIES_<NAME>_INDEX` or as an inline
-  `name = { index = "sparse+https://..." }` entry in `.cargo/config.toml`.
+  `CARGO_REGISTRIES_<NAME>_INDEX` or in `.cargo/config.toml`, as either
+  `name = { index = "sparse+https://..." }` under `[registries]` or an
+  `index = "..."` line under `[registries.name]`.
   Run the resolver's tests with `bash cargo-release-tag/test_registry_index.sh`.
 
 The action reaches GitHub over HTTPS with `github-token` and leaves the local

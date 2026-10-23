@@ -43,9 +43,10 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
   # that don't reach the crate. No lockfile: it doesn't affect a library's
   # consumers, and packaging one needs every workspace dependency on
   # crates.io already.
+  SCRATCH=$(mktemp -d)
   packaged() { # packaged <checkout> <package> <dir>
     local target
-    target=$(mktemp -d)
+    target=$(mktemp -d -p "$SCRATCH")
     (cd "$1" && cargo package --quiet --locked --no-verify --allow-dirty --exclude-lockfile \
       -p "$2" --target-dir "$target")
     mkdir -p "$3"
@@ -54,7 +55,7 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
   }
   TAG_TREE=$(mktemp -d)
   git worktree add --quiet --detach "$TAG_TREE" "$TAG_SHA"
-  trap 'git worktree remove --force "$TAG_TREE"' EXIT
+  trap 'git worktree remove --force "$TAG_TREE"; rm -rf "$SCRATCH"' EXIT
 
   for pkg in $PACKAGES; do
     if ! on_index "$pkg" "$VERSION"; then
@@ -62,7 +63,7 @@ if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$HEAD_SHA" ]; then
       echo "::error::A previous release likely died between tag push and publish. Re-run it from the tagged commit, or delete the stale tag"
       exit 1
     fi
-    cmp=$(mktemp -d)
+    cmp=$(mktemp -d -p "$SCRATCH")
     packaged "$TAG_TREE" "$pkg" "$cmp/tag"
     packaged . "$pkg" "$cmp/head"
     if ! diff -r "$cmp/tag" "$cmp/head"; then
