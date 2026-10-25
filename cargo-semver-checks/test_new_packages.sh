@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Local tests for new-packages.sh. Run: bash cargo-semver-checks/test_new_packages.sh
+# Local tests for new-packages.sh and checkable-packages.sh.
+# Run: bash cargo-semver-checks/test_new_packages.sh
 #
-# Each case builds a throwaway git repository with a cargo workspace, tags a
-# baseline, changes the workspace, and checks which packages the script
-# reports as missing from the baseline. Needs cargo, git and jq.
+# Each new-packages.sh case builds a throwaway git repository with a cargo
+# workspace, tags a baseline, changes the workspace, and checks which packages
+# the script reports as missing from the baseline. Needs cargo, git and jq.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/new-packages.sh"
@@ -28,6 +29,11 @@ crate() { # crate <dir> <name> [<dependency line>]
   : > "$1/src/lib.rs"
   printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n%s\n' \
     "$2" "${3:-}" > "$1/Cargo.toml"
+}
+
+kind() { # kind <dir> <name> <manifest lines>: a crate with no default lib target
+  mkdir -p "$1/src"
+  printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n%s\n' "$2" "$3" > "$1/Cargo.toml"
 }
 
 workspace() { # workspace <dir> <member>...
@@ -127,5 +133,17 @@ if (cd "$R" && bash "$SCRIPT" Cargo.toml v0.1.0) >/dev/null 2>"$TMP/err"; then
 else
   check "untracked manifest fails" "error" "error"
 fi
+
+# ---- checkable-packages.sh: what cargo-semver-checks can select ----
+R="$TMP/kinds"
+mkdir -p "$R"
+crate "$R/lib" lib
+kind "$R/bin" bin ''; echo 'fn main() {}' > "$R/bin/src/main.rs"
+kind "$R/pmacro" pmacro $'[lib]\nproc-macro = true'; : > "$R/pmacro/src/lib.rs"
+kind "$R/private" private 'publish = false'; : > "$R/private/src/lib.rs"
+kind "$R/cdylib" cdylib $'[lib]\ncrate-type = ["cdylib"]'; : > "$R/cdylib/src/lib.rs"
+workspace "$R" lib bin pmacro private cdylib
+check "library-like targets, publish = false included" "cdylib lib private" \
+  "$(bash "$HERE/checkable-packages.sh" "$R/Cargo.toml" | paste -sd ' ' -)"
 
 exit "$FAILED"

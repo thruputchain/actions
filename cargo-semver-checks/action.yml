@@ -251,14 +251,13 @@ runs:
             skip_new "$package"
             ARGS+=(--exclude "$package")
           done
-          # cargo-semver-checks fails when nothing is left to check ("no
-          # crates with library targets selected").
+          # cargo-semver-checks fails when no package left has a library
+          # target ("no crates with library targets selected").
           if [ -n "$NEW" ]; then
             LEFT=0
             while read -r package; do
               listed "$package" "$EXCLUDE $NEW" || LEFT=$((LEFT + 1))
-            done < <(cargo metadata --no-deps --format-version 1 --manifest-path "$CARGO_TOML_PATH" \
-                       | jq -r '.packages[] | select(.publish != []) | .name')
+            done < <(bash "$ACTION_PATH/checkable-packages.sh" "$CARGO_TOML_PATH")
             if [ "$LEFT" -eq 0 ]; then
               nothing_to_check "$BASELINE_REV has none of the workspace's packages left to check; skipping semver checks"
             fi
