@@ -18,6 +18,9 @@ pull request is checked against the last release of its own branch history.
 - Installs and pins `cargo-semver-checks`, reusing an already-installed binary
   on self-hosted runners
 - Skips (with a notice, not a failure) when a repo has no release tag yet
+- Skips (with a notice) packages a git baseline doesn't have, such as crates
+  added or renamed since the last release; see
+  [New and renamed packages](#new-and-renamed-packages)
 
 ## Requirements
 
@@ -26,6 +29,7 @@ pull request is checked against the last release of its own branch history.
 - A Rust toolchain on the runner. `cargo-semver-checks` emits rustdoc JSON from
   whichever toolchain the repo resolves to (`rust-toolchain.toml` or the runner
   default); no nightly is needed.
+- `jq` on the runner, to compare the workspace's packages with a git baseline's.
 
 ## Usage
 
@@ -151,6 +155,25 @@ PR, and a build script in that PR can exfiltrate it. Prefer running this on
 
 If you do need it on pull requests, scope the token to read-only on the
 registry, so a leak cannot be used to publish.
+
+## New and renamed packages
+
+A package the baseline doesn't have, because it was added or renamed since,
+has no earlier API to break, and `cargo-semver-checks` fails on it
+("package `x` not found"). With a git baseline (`baseline-rev`, or a
+discovered tag) the action lists the baseline's packages with
+`cargo metadata --no-deps` and leaves the missing ones out, with a notice for
+each: from a whole-workspace check as if they were in `exclude`, and from
+`packages`. If that leaves nothing to check, the action skips the check with a
+notice. A renamed package is checked again once a release that contains it is
+the baseline.
+
+`cargo metadata` reads the baseline's manifests with the caller's cargo
+configuration, as `cargo-semver-checks` does, so a baseline that names a
+registry needs that registry defined, by `.cargo/config.toml` or by a
+`CARGO_REGISTRIES_<NAME>_INDEX` variable on the step. A registry baseline
+(`baseline-version`) isn't inspected, so a package it lacks still fails the
+check.
 
 ## Feature selection
 

@@ -84,3 +84,7 @@ jobs:
           bash cargo-yank/test_validate_version.sh
       - name: Yank failure classification
         run: bash cargo-yank/test_registry_missing.sh
+      - name: Semver-check new-package detection
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: bash cargo-semver-checks/test_new_packages.sh
