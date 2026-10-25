@@ -42,9 +42,13 @@ fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# From the top level: run in a subdirectory, git archive takes only that.
-git -C "$TOP" archive "$REV" | tar -x -C "$TMP"
-if ! BASELINE=$(package_names "$TMP/$REL"); then
+# Through a temporary index, leaving the caller's alone. Not git archive: it
+# drops paths marked export-ignore, and their crates would look new. Nothing
+# here needs LFS content, so don't fetch any.
+GIT_INDEX_FILE="$TMP/index" git -C "$TOP" read-tree "$REV"
+GIT_INDEX_FILE="$TMP/index" GIT_LFS_SKIP_SMUDGE=1 \
+  git -C "$TOP" checkout-index --all --prefix="$TMP/tree/"
+if ! BASELINE=$(package_names "$TMP/tree/$REL"); then
   echo "::error::cargo can't read the workspace at $REV, so its packages are unknown" >&2
   exit 1
 fi

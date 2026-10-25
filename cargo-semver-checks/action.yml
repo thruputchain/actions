@@ -63,10 +63,10 @@ inputs:
 outputs:
   baseline:
     description: 'The baseline that was compared against, e.g. "rev:v0.25.0" or "version:0.25.0". Empty when the check was skipped.'
-    value: ${{ steps.baseline.outputs.baseline }}
+    value: ${{ steps.run.outputs.baseline }}
   skipped:
-    description: 'true when no baseline could be discovered and the check did not run.'
-    value: ${{ steps.baseline.outputs.skipped }}
+    description: 'true when the check did not run: no baseline could be discovered, or the baseline has none of the packages to check.'
+    value: ${{ steps.run.outputs.skipped || steps.baseline.outputs.skipped }}
 
 runs:
   using: 'composite'
@@ -175,9 +175,11 @@ runs:
         tool: ${{ steps.probe.outputs.tool }}
 
     - name: Run cargo-semver-checks
+      id: run
       if: steps.baseline.outputs.skipped != 'true'
       shell: bash
       env:
+        BASELINE: ${{ steps.baseline.outputs.baseline }}
         CARGO_TOML_PATH: ${{ inputs.cargo-toml-path }}
         PACKAGES: ${{ inputs.packages }}
         EXCLUDE: ${{ inputs.exclude }}
@@ -217,6 +219,12 @@ runs:
           listed "$1" "$NEW" || return 1
           echo "::notice::Skipping $1: $BASELINE_REV doesn't have it, so there is no earlier API to compare"
         }
+        nothing_to_check() { # nothing_to_check <notice>: skip the check, as the outputs say
+          echo "::notice::$1"
+          echo "baseline=" >> "$GITHUB_OUTPUT"
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
 
         ARGS=(--manifest-path "$CARGO_TOML_PATH" --color always)
 
@@ -231,8 +239,7 @@ runs:
             SELECTED=$((SELECTED + 1))
           done
           if [ "$SELECTED" -eq 0 ]; then
-            echo "::notice::$BASELINE_REV has none of the packages to check; skipping semver checks"
-            exit 0
+            nothing_to_check "$BASELINE_REV has none of the packages to check; skipping semver checks"
           fi
         else
           ARGS+=(--workspace)
@@ -253,8 +260,7 @@ runs:
             done < <(cargo metadata --no-deps --format-version 1 --manifest-path "$CARGO_TOML_PATH" \
                        | jq -r '.packages[] | select(.publish != []) | .name')
             if [ "$LEFT" -eq 0 ]; then
-              echo "::notice::$BASELINE_REV has none of the workspace's packages left to check; skipping semver checks"
-              exit 0
+              nothing_to_check "$BASELINE_REV has none of the workspace's packages left to check; skipping semver checks"
             fi
           fi
         fi
@@ -285,6 +291,8 @@ runs:
           ARGS+=(--target "$TARGET")
         fi
 
+        echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+        echo "skipped=false" >> "$GITHUB_OUTPUT"
         echo "Running: cargo semver-checks ${ARGS[*]}"
         cargo semver-checks "${ARGS[@]}"
 

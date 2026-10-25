@@ -137,7 +137,7 @@ check, and one that carries the credential caveat below.
 | Output | Description |
 | --- | --- |
 | `baseline` | The baseline compared against, e.g. `rev:v0.25.0` or `version:0.25.0`. Empty when skipped. |
-| `skipped` | `true` when no baseline could be discovered and the check did not run. |
+| `skipped` | `true` when the check did not run: no baseline could be discovered, or the baseline has none of the packages to check. |
 
 ## Credentials and untrusted code
 

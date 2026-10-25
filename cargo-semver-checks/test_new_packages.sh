@@ -60,6 +60,18 @@ workspace "$R" a c d
 commit "$R"
 check "an added crate and a renamed one" "c d" "$(new_packages "$R" Cargo.toml v0.1.0)"
 
+# ---- Paths marked export-ignore are still part of the baseline ----
+R="$TMP/export-ignore"
+repo "$R"
+crate "$R/a" a; crate "$R/b" b
+workspace "$R" a b
+echo 'b export-ignore' > "$R/.gitattributes"
+commit "$R" v0.1.0
+crate "$R/c" c
+workspace "$R" a b c
+commit "$R"
+check "a crate under an export-ignore path isn't new" "c" "$(new_packages "$R" Cargo.toml v0.1.0)"
+
 # ---- A baseline from before the workspace existed: every package is new ----
 R="$TMP/fresh"
 repo "$R"
