@@ -105,7 +105,10 @@ jobs:
           # argument at all, which is how cargo-deny runs every check.
           # Every workspace is checked before failing, so one run reports all
           # of them. cargo-deny reads ./deny.toml whatever the manifest.
-          read -ra extra <<< "$MANIFEST_PATHS"
+          # All of the input, split on spaces, tabs, and newlines: a YAML
+          # block may list one manifest per line. Reading to end of input
+          # returns 1.
+          read -r -d '' -a extra <<< "$MANIFEST_PATHS" || true
           status=0
           for manifest in Cargo.toml "${extra[@]}"; do
             echo "::group::$manifest"
