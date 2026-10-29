@@ -187,6 +187,14 @@ jobs:
 Runs `cargo deny check` against the caller's `deny.toml`, all four checks by default or the
 subset given in `checks`. Takes an optional private registry name and token.
 
+The root workspace is always checked. To check other workspaces with their own lockfiles,
+list their manifests in `manifest-paths`; the root `deny.toml` applies to each:
+
+```yaml
+    with:
+      manifest-paths: tools/runner/Cargo.toml
+```
+
 ```yaml
 jobs:
   dependency-policy:

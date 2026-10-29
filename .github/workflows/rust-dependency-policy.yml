@@ -5,7 +5,8 @@ name: Rust dependency policy
 #     dependency-policy:
 #       uses: thruputchain/actions/.github/workflows/rust-dependency-policy.yml@<ref>
 #
-# Policy stays in the calling repository's `deny.toml`.
+# Policy stays in the calling repository's `deny.toml`, at its root. It also
+# applies to the workspaces listed in `manifest-paths`.
 
 on:
   workflow_call:
@@ -19,6 +20,15 @@ on:
         description: >-
           cargo-deny checks to run. Empty (default) runs all four and reports
           each in one summary line.
+        type: string
+        required: false
+        default: ""
+      manifest-paths:
+        description: >-
+          Manifests of more workspaces to check, such as a tool with its own
+          lockfile, separated by whitespace and relative to the repository
+          root. The root workspace is always checked, and the root deny.toml
+          applies to every workspace.
         type: string
         required: false
         default: ""
@@ -70,6 +80,7 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ inputs.toolchain }}
           CHECKS: ${{ inputs.checks }}
+          MANIFEST_PATHS: ${{ inputs.manifest-paths }}
           REGISTRY_NAME: ${{ inputs.registry-name }}
           REGISTRY_TOKEN: ${{ secrets.registry-token }}
         run: |
@@ -92,5 +103,18 @@ jobs:
           # Graph flags must precede the subcommand; cargo-deny rejects them
           # after it. CHECKS is unquoted on purpose: empty must expand to no
           # argument at all, which is how cargo-deny runs every check.
-          # shellcheck disable=SC2086
-          cargo deny --all-features --locked check $CHECKS
+          # Every workspace is checked before failing, so one run reports all
+          # of them. cargo-deny reads ./deny.toml whatever the manifest.
+          read -ra extra <<< "$MANIFEST_PATHS"
+          status=0
+          for manifest in Cargo.toml "${extra[@]}"; do
+            echo "::group::$manifest"
+            # shellcheck disable=SC2086
+            if ! cargo deny --manifest-path "$manifest" --all-features \
+                --locked check $CHECKS; then
+              echo "::error file=$manifest::dependency policy check failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
