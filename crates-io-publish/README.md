@@ -63,6 +63,28 @@ action waits until the time crates.io gives in the response ("Please try again a
 retries, up to 15 attempts per crate, so a first release of more than five crates takes longer
 instead of failing halfway.
 
+### Index propagation lag
+
+`cargo publish` resolves a crate's dependencies against the crates.io index before uploading it.
+A version published a moment earlier can be missing there for a while, because index.crates.io
+is served through a CDN that can return a stale copy. This can happen even after cargo's own
+wait for the previous publish has seen the version. A group whose crates depend on each other
+can then fail partway with:
+
+```
+failed to select a version for the requirement `my-crate-macros = "=1.2.0"`
+candidate versions found which didn't match: 1.1.0
+location searched: crates.io index
+```
+
+(or `no matching package named ...` for a crate this run created). When the missing version is
+one that this run published, or already found on crates.io, and the index doesn't list it, the
+action retries that crate's `cargo publish` with backoff: 10s, then doubling to at most 60s
+between tries, for up to 10 minutes per crate. Nothing was uploaded on the failed attempt,
+because cargo resolves dependencies first. If the version still doesn't appear, the run fails
+and names the missing crate and version, and re-running the job resumes the release. Any other
+resolution failure fails at once, including a dependency listed after the crate in `packages`.
+
 ## Usage
 
 ```yaml

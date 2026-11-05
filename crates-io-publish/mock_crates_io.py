@@ -34,6 +34,11 @@ oidc_tokens = {}  # crates.io trusted publishing token -> allowed crate keys
 rate_limited = set()  # crate keys whose next new-crate publish gets a 429
 reject_patch = False  # whether crate settings updates fail
 retry_after = 0  # seconds from now the 429 says to retry after
+# crate key -> how many index reads miss that crate's next uploaded version,
+# as a stale index.crates.io response does right after a publish
+index_lag = {}
+# (name, version) -> index reads left that miss it
+hidden = {}
 log = []
 
 
@@ -106,10 +111,18 @@ class Handler(BaseHTTPRequestHandler):
             crate = crates.get(key(name))
             if not crate or crate["name"].lower() != name:
                 return self.error(404, "not found")
+            versions = []
+            for v in sorted(crate["versions"]):
+                if hidden.get((crate["name"], v), 0) > 0:
+                    hidden[(crate["name"], v)] -= 1
+                else:
+                    versions.append(v)
+            if not versions:
+                return self.error(404, "not found")
             lines = "".join(json.dumps({"name": crate["name"], "vers": v,
                                         "cksum": cksums.get((crate["name"], v)) or
                                         hashlib.sha256(files.get((crate["name"], v), b"")).hexdigest()})
-                            + "\n" for v in sorted(crate["versions"]))
+                            + "\n" for v in versions)
             body = lines.encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -175,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
             elif k not in oidc_tokens.get(token, []):
                 return self.error(403, "this token can't publish " + body["name"])
             crates[k]["versions"].add(body["vers"])
+            if k in index_lag:
+                hidden[(body["name"], body["vers"])] = index_lag.pop(k)
             files[(body["name"], body["vers"])] = base64.b64decode(body["crate"])
             provenance[(body["name"], body["vers"])] = None if token == BOOTSTRAP else {
                 "provider": "github", "repository": claims["repository"],
@@ -200,6 +215,11 @@ class Handler(BaseHTTPRequestHandler):
                     provenance[(name, vers)] = data
             for name in body.get("trustpub_only", []):
                 crates[key(name)]["trustpub_only"] = True
+            for name, reads in body.get("index_lag", {}).items():
+                index_lag[key(name)] = reads
+            for name, versions in body.get("hidden", {}).items():
+                for vers, reads in versions.items():
+                    hidden[(name, vers)] = reads
             for name in body.get("rate_limited", []):
                 rate_limited.add(key(name))
             retry_after = body.get("retry_after", retry_after)
@@ -213,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
             provenance.clear()
             oidc_tokens.clear()
             rate_limited.clear()
+            index_lag.clear()
+            hidden.clear()
             retry_after = 0
             reject_patch = False
             log.clear()

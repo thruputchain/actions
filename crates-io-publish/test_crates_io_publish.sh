@@ -38,8 +38,31 @@ esac
 case "\$1" in
   publish)
     pkg=\$(sed -n 's/.* -p \([^ ]*\).*/\1/p' <<<"\$*")
-    vers=\$("$REAL_CARGO" metadata --no-deps --format-version 1 | jq -r --arg p "\$pkg" '.packages[] | select(.name == \$p) | .version')
-    "$REAL_CARGO" package --quiet --no-verify --allow-dirty -p "\$pkg" --target-dir "$TMP/stub-package" >&2
+    meta=\$("$REAL_CARGO" metadata --no-deps --format-version 1)
+    vers=\$(jq -r --arg p "\$pkg" '.packages[] | select(.name == \$p) | .version' <<<"\$meta")
+    # As cargo does before uploading, resolve the dependencies on other
+    # workspace crates (all "=<version>" here) against the index, and fail
+    # as cargo does when it doesn't list them.
+    while read -r dep req; do
+      want=\${req#=}
+      listed=\$(curl -sSf "$MOCK/index/x/\$dep" 2>/dev/null | jq -r .vers || true)
+      if ! grep -qxF "\$want" <<<"\$listed"; then
+        echo "error: failed to prepare local package for uploading"
+        echo
+        echo "Caused by:"
+        if [ -z "\$listed" ]; then
+          echo "  no matching package named \\\`\$dep\\\` found"
+        else
+          echo "  failed to select a version for the requirement \\\`\$dep = \\"\$req\\"\\\`"
+          echo "  candidate versions found which didn't match: \$(sort -rV <<<"\$listed" | paste -sd, | sed 's/,/, /g')"
+        fi
+        echo "  location searched: crates.io index"
+        echo "  required by package \\\`\$pkg v\$vers (\$PWD)\\\`"
+        exit 101
+      fi
+    done < <(jq -r --arg p "\$pkg" '.packages[] | select(.name == \$p) | .dependencies[]
+      | select(.path != null and (.kind == null or .kind == "build")) | "\\(.name) \\(.req)"' <<<"\$meta")
+    "$REAL_CARGO" package --quiet --no-verify --allow-dirty --exclude-lockfile -p "\$pkg" --target-dir "$TMP/stub-package" >&2
     crate=\$(base64 -w0 "$TMP/stub-package/package/\$pkg-\$vers.crate")
     code=\$(jq -n --arg n "\$pkg" --arg v "\$vers" --arg t "\$CARGO_REGISTRY_TOKEN" --arg c "\$crate" \
         --arg s "\$(git rev-parse HEAD)" '{name: \$n, vers: \$v, token: \$t, crate: \$c, sha: \$s}' \
@@ -326,5 +349,66 @@ check "failing to require trusted publishing fails the run" "exit 1" "$(result "
 check "... once both crates are published" '["0.2.2"] ["0.1.0","0.2.2"]' \
   "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
 check "... naming the setting to tick for each crate" 2 "$(grep -c 'still accepts new versions published with API tokens' "$TMP/last.log" || true)"
+
+# ---- index lag ----
+# zz-dep depends on zz-new, so publishing it resolves zz-new@0.3.0 against
+# the index, which can lag behind the publish that put it there.
+mkdir -p "$WS/dep/src"
+: > "$WS/dep/src/lib.rs"
+sed -i 's/^members = .*/members = ["new", "old", "dep"]/; s/^version = "0.2.2"/version = "0.3.0"/' "$WS/Cargo.toml"
+printf '[package]\nname = "zz-dep"\nversion.workspace = true\nedition = "2021"\nlicense = "MIT"\ndescription = "t"\n\n[dependencies]\nzz-new = { path = "../new", version = "=0.3.0" }\n' > "$WS/dep/Cargo.toml"
+(cd "$WS" && "$REAL_CARGO" generate-lockfile --offline -q)
+git -C "$WS" add -A
+git -C "$WS" commit -qm "0.3.0 with zz-dep"
+git -C "$WS" tag v0.3.0
+lag_run() { run publish GIT_TAG=v0.3.0 PACKAGES="zz-new zz-dep" BOOTSTRAP_TOKEN=boot INDEX_LAG_WAIT=1 "$@"; }
+retries() { grep -c '^Waiting for zz-new@0.3.0 to appear in the crates.io index' "$TMP/last.log" || true; }
+
+# A new version of an existing crate: cargo sees older versions only.
+reset
+mock seed '{"crates": {"zz-new": ["0.2.2"]}, "index_lag": {"zz-new": 2},
+  "configs": [{"crate": "zz-new", "repository_owner": "o", "repository_name": "r",
+               "workflow_filename": "publish.yml", "environment": null}]}'
+r=$(lag_run)
+check "a dependency's lagging new version is waited for" "exit 0" "$(result "$r")"
+check "... retrying on cargo's version-selection error" 2 \
+  "$(grep -c 'failed to select a version for the requirement `zz-new = "=0.3.0"`' "$TMP/last.log" || true)"
+check "... until the index lists it" 2 "$(retries)"
+check "... with backoff" 1 "$(grep -c 'retrying zz-dep in 2s' "$TMP/last.log" || true)"
+check "both crates published" '["0.2.2","0.3.0"] ["0.3.0"]' \
+  "$(state '.crates["zz-new"].versions') $(state '.crates["zz-dep"].versions')"
+
+# A crate this run created: cargo doesn't see the crate at all.
+reset
+mock seed '{"index_lag": {"zz-new": 1}}'
+r=$(lag_run)
+check "a dependency's lagging first version is waited for" "exit 0" "$(result "$r")"
+check "... retrying on cargo's missing-package error" "1 1" \
+  "$(grep -c 'no matching package named `zz-new` found' "$TMP/last.log" || true) $(retries)"
+
+# The index never catches up: the wait is bounded, and names what's missing.
+reset
+mock seed '{"index_lag": {"zz-new": 1000}}'
+start=$(date +%s)
+r=$(lag_run INDEX_LAG_TIMEOUT=4)
+waited=$(($(date +%s) - start))
+check "a version that never appears fails the run" "exit 1" "$(result "$r")"
+check "... naming the crate and version" 1 \
+  "$(grep -c '::error::zz-new@0.3.0 never appeared in the crates.io index cargo reads, after waiting 4s to publish zz-dep' "$TMP/last.log" || true)"
+check "... after waiting no longer than INDEX_LAG_TIMEOUT" "3 true" "$(retries) $([ "$waited" -lt 15 ] && echo true || echo false)"
+check "... without publishing zz-dep" '["0.3.0"] null' \
+  "$(state '.crates["zz-new"].versions') $(state '.crates["zz-dep"].versions')"
+mock seed '{"hidden": {"zz-new": {"0.3.0": 0}}}'
+r=$(lag_run)
+check "the re-run skips zz-new and publishes zz-dep" "exit 0 1 0" \
+  "$(result "$r") $(grep -c '^SKIP: zz-new@0.3.0' "$TMP/last.log" || true) $(retries)"
+check "... once" '["0.3.0"] ["0.3.0"]' "$(state '.crates["zz-new"].versions') $(state '.crates["zz-dep"].versions')"
+
+# Real resolution failures aren't retried: zz-new isn't published yet when
+# zz-dep (listed out of dependency order) needs it.
+reset
+r=$(lag_run PACKAGES="zz-dep zz-new" INDEX_LAG_TIMEOUT=60)
+check "a dependency this run hasn't released fails at once" "exit 1 0" "$(result "$r") $(retries)"
+check "... as a failed publish" 1 "$(grep -c '::error::Failed to publish zz-dep' "$TMP/last.log" || true)"
 
 exit "$FAILED"
