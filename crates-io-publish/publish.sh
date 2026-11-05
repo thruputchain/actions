@@ -16,7 +16,10 @@
 # REQUIRE_TRUSTED_PUBLISHING (default true), PUBLISH_ARGS, GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF,
 # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN (from id-token: write), and
 # RATE_LIMIT_WAIT (seconds between 429 retries when the 429 doesn't say
-# when to retry; default 120).
+# when to retry; default 120), INDEX_LAG_WAIT (first wait, in seconds, before
+# retrying a publish that can't yet see a version this run released; doubles
+# up to 60; default 10) and INDEX_LAG_TIMEOUT (the most it waits for one
+# crate; default 600).
 # Run tests: bash crates-io-publish/test_crates_io_publish.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 RATE_LIMIT_WAIT="${RATE_LIMIT_WAIT:-120}"
+INDEX_LAG_WAIT="${INDEX_LAG_WAIT:-10}"
+INDEX_LAG_TIMEOUT="${INDEX_LAG_TIMEOUT:-600}"
 REQUIRE_TRUSTED_PUBLISHING="${REQUIRE_TRUSTED_PUBLISHING:-true}"
 API="$CRATES_IO_API_URL"
 
@@ -44,6 +49,9 @@ REPO_NAME="${GITHUB_REPOSITORY#*/}"
 WORKFLOW_FILE="${GITHUB_WORKFLOW_REF%%@*}"
 WORKFLOW_FILE="${WORKFLOW_FILE##*/}"
 FAILED=0
+# The packages, processed so far, whose $VERSION is on crates.io: published
+# by this run, or found there and skipped. Space-delimited.
+RELEASED=" "
 
 # Tokens travel in headers read from a file descriptor, never in argv.
 api() { # api <auth-header-value> <curl args...>: prints the body, then the status on its own line
@@ -167,15 +175,51 @@ require_trusted_publishing() {
   echo "OK: $crate now requires trusted publishing for new versions"
 }
 
+# lagging_dependency <cargo output>: the crate, among RELEASED, that the
+# failed `cargo publish` couldn't find at $VERSION in the index, if that's
+# why it failed. cargo resolves the packaged crate's dependencies against
+# index.crates.io, and a version published moments ago can be missing there
+# for a while (a stale CDN response), even after cargo's own wait for the
+# previous publish saw it. cargo reports a missing version as
+#   failed to select a version for the requirement `<crate> = "<req>"`
+#   candidate versions found which didn't match: <versions>
+#   location searched: crates.io index
+# and a crate whose first version is missing as
+#   no matching package named `<crate>` found
+#   location searched: crates.io index
+# Anything else (another crate, a version the index does list, a crate
+# later in PACKAGES, a packaging error) is a real failure.
+lagging_dependency() {
+  local output="$1" dep
+  grep -qE 'location searched: .*crates[.-]io.* index' <<<"$output" || return 1
+  # shellcheck disable=SC2016 # the backticks are cargo's, not expansions
+  dep=$(sed -n -e 's/.*failed to select a version for the requirement `\([^ `]*\) = .*/\1/p' \
+    -e 's/.*no matching package named `\([^`]*\)` found.*/\1/p' <<<"$output" | head -n1)
+  [ -n "$dep" ] && [[ "$RELEASED" == *" $dep "* ]] || return 1
+  # A listed $VERSION that still doesn't match isn't lag.
+  if sed -n "s/.*candidate versions found which didn't match: //p" <<<"$output" \
+      | tr ',' '\n' | tr -d ' ' | grep -xF "$VERSION" >/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$dep"
+}
+
 # crates.io rate-limits publishing (new crates: a burst of 5, then one every
 # 10 minutes; new versions: a burst of 30, then one a minute), so a 429 waits
 # and retries instead of failing a release halfway. The 429 says when to
 # retry ("Please try again after Thu, 23 Oct 2026 05:00:00 GMT"), and cargo
 # prints it; RATE_LIMIT_WAIT is the fallback when it can't be read.
+#
+# A publish that can't see a dependency this run released (see
+# lagging_dependency) waits for the index to catch up and retries, with
+# backoff, for up to INDEX_LAG_TIMEOUT seconds in all. cargo resolves before
+# it uploads, so the failed attempt uploaded nothing.
 # --registry: a [registry] default elsewhere must not redirect it.
 publish() { # publish <package> <token>
-  local pkg="$1" token="$2" attempt output rc retry_at retry_epoch delay
-  for attempt in $(seq 1 15); do
+  local pkg="$1" token="$2" attempt=1 output rc retry_at retry_epoch delay dep
+  local lag_delay="$INDEX_LAG_WAIT" lag_waited=0
+  # attempt counts 429s only: index waits have their own bound.
+  while true; do
     rc=0
     # shellcheck disable=SC2086 # PUBLISH_ARGS is a list of flags
     output=$(CARGO_REGISTRY_TOKEN="$token" cargo publish --registry crates-io --locked -p "$pkg" $PUBLISH_ARGS 2>&1) || rc=$?
@@ -195,6 +239,22 @@ publish() { # publish <package> <token>
         echo "crates.io rate limit (attempt $attempt); retrying in ${delay}s"
       fi
       sleep "$delay"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    if dep=$(lagging_dependency "$output"); then
+      if [ "$lag_waited" -ge "$INDEX_LAG_TIMEOUT" ]; then
+        echo "::error::$dep@$VERSION never appeared in the crates.io index cargo reads, after waiting ${lag_waited}s to publish $pkg; it is on crates.io, so re-run the job to resume the release"
+        exit 1
+      fi
+      delay=$((lag_delay > 0 ? lag_delay : 1))
+      if [ "$delay" -gt $((INDEX_LAG_TIMEOUT - lag_waited)) ]; then
+        delay=$((INDEX_LAG_TIMEOUT - lag_waited))
+      fi
+      echo "Waiting for $dep@$VERSION to appear in the crates.io index (waited ${lag_waited}s of ${INDEX_LAG_TIMEOUT}s); retrying $pkg in ${delay}s"
+      sleep "$delay"
+      lag_waited=$((lag_waited + delay))
+      lag_delay=$((lag_delay * 2 > 60 ? 60 : lag_delay * 2))
       continue
     fi
     echo "::error::Failed to publish $pkg"
@@ -243,6 +303,8 @@ for pkg in $PACKAGES; do
     revoke_oidc
     ENSURED=true
   fi
+  # Every branch that gets here leaves $pkg@$VERSION on crates.io.
+  RELEASED+="$pkg "
 
   # With the token, every crate in the group ends with a trusted publisher
   # and, unless REQUIRE_TRUSTED_PUBLISHING=false, requiring trusted
