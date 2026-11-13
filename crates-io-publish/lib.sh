@@ -2,7 +2,8 @@
 # Shared helpers for check.sh and publish.sh. Sourced, not run.
 #
 # CRATES_IO_API_URL and CRATES_IO_INDEX_URL default to crates.io; the tests
-# point them at a local mock.
+# point them at a local mock. Every request goes through http, which retries
+# transient failures.
 
 CRATES_IO_API_URL="${CRATES_IO_API_URL:-https://crates.io/api/v1}"
 CRATES_IO_INDEX_URL="${CRATES_IO_INDEX_URL:-https://index.crates.io}"
@@ -10,6 +11,11 @@ CRATES_IO_DL_URL="${CRATES_IO_DL_URL:-https://static.crates.io/crates}"
 # crates.io asks API clients for at most one request per second.
 CRATES_IO_API_DELAY="${CRATES_IO_API_DELAY:-1}"
 USER_AGENT="thruputchain-actions/crates-io-publish (https://github.com/thruputchain/actions)"
+# A request that fails in transit, or gets a 429 or 5xx, is made up to
+# HTTP_ATTEMPTS times, waiting HTTP_RETRY_WAIT seconds before the second and
+# twice as long before each one after (about a minute in all).
+HTTP_ATTEMPTS="${HTTP_ATTEMPTS:-6}"
+HTTP_RETRY_WAIT="${HTTP_RETRY_WAIT:-2}"
 
 METADATA=$(cargo metadata --no-deps --format-version 1 --locked)
 
@@ -34,13 +40,47 @@ index_path() {
   esac
 }
 
+# transient <status>: whether an HTTP status is worth retrying: none at all
+# (000: no connection, a timeout, a transfer cut short), 429 or 5xx.
+# Any other 4xx is an answer.
+transient() {
+  [[ "$1" == 000 || "$1" == 429 || "$1" == 5?? ]]
+}
+
+# http <file> <authorization> <curl args...>: one request, with the response
+# body written to <file>; prints the HTTP status, 000 when there was none.
+# Transient failures are retried (see HTTP_ATTEMPTS), so the status is a
+# transient one only once those ran out. <authorization> is the value of the
+# Authorization header, or empty for none: it reaches curl through a file
+# descriptor, never argv, and is passed here rather than as -H @<(...) by
+# the caller, which a retry would find already read. For the same reason
+# the request body can't come from stdin.
+http() {
+  local out="$1" auth="$2" attempt=1 delay="$HTTP_RETRY_WAIT" code url
+  shift 2
+  url="${*: -1}"
+  while true; do
+    code=$(curl -sS --connect-timeout 20 --max-time 300 -o "$out" -w '%{http_code}' \
+      -H "User-Agent: $USER_AGENT" \
+      -H @<([ -z "$auth" ] || printf 'Authorization: %s\n' "$auth") "$@") || code=000
+    if ! transient "$code" || [ "$attempt" -ge "$HTTP_ATTEMPTS" ]; then
+      echo "$code"
+      return 0
+    fi
+    echo "Request to ${url%%\?*} failed (HTTP $code, attempt $attempt of $HTTP_ATTEMPTS); retrying in ${delay}s" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 # on_index <crate> <version>: whether the crates.io index lists the version
 # (yanked or not). Exits when the index can't be read, so an outage is never
 # mistaken for "not published".
 on_index() {
   local body code rc
   body=$(mktemp)
-  code=$(curl -sS -o "$body" -w '%{http_code}' "$CRATES_IO_INDEX_URL/$(index_path "$1")")
+  code=$(http "$body" "" "$CRATES_IO_INDEX_URL/$(index_path "$1")")
   case "$code" in
     # Not grep -q: exiting at the first match can fail jq with SIGPIPE,
     # which pipefail would report as "not listed".
@@ -69,8 +109,7 @@ on_index() {
 published_from() {
   local pkg="$1" vers="$2" sha="$3" body code trustpub
   body=$(mktemp)
-  code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
-    "$CRATES_IO_API_URL/crates/$pkg/$vers")
+  code=$(http "$body" "" "$CRATES_IO_API_URL/crates/$pkg/$vers")
   sleep "$CRATES_IO_API_DELAY"
   if [ "$code" != 200 ] || ! trustpub=$(jq -c '.version | if has("trustpub_data") then .trustpub_data else error("no trustpub_data") end' "$body"); then
     rm -f "$body"
@@ -102,15 +141,16 @@ published_from() {
 # builds from the normalized Cargo.toml). Exits when the crate can't be
 # fetched or verified.
 matches_published() {
-  local pkg="$1" vers="$2" dir want got rc=0
+  local pkg="$1" vers="$2" dir code want got rc=0
   dir=$(mktemp -d)
-  if ! want=$(curl -sSf "$CRATES_IO_INDEX_URL/$(index_path "$pkg")" \
-      | jq -er --arg v "$vers" 'select(.vers == $v) | .cksum'); then
-    echo "::error::Could not read the checksum of $pkg@$vers from the crates.io index"
+  code=$(http "$dir/index" "" "$CRATES_IO_INDEX_URL/$(index_path "$pkg")")
+  if [ "$code" != 200 ] || ! want=$(jq -er --arg v "$vers" 'select(.vers == $v) | .cksum' "$dir/index"); then
+    echo "::error::Could not read the checksum of $pkg@$vers from the crates.io index (HTTP $code)"
     exit 1
   fi
-  if ! curl -sSfL -o "$dir/published.crate" "$CRATES_IO_DL_URL/$pkg/$pkg-$vers.crate"; then
-    echo "::error::Could not download $pkg@$vers from crates.io"
+  code=$(http "$dir/published.crate" "" -L "$CRATES_IO_DL_URL/$pkg/$pkg-$vers.crate")
+  if [ "$code" != 200 ]; then
+    echo "::error::Could not download $pkg@$vers from crates.io (HTTP $code)"
     exit 1
   fi
   got=$(sha256sum "$dir/published.crate" | cut -d' ' -f1)
@@ -141,8 +181,7 @@ matches_published() {
 crates_io_name() {
   local body code name rc
   body=$(mktemp)
-  code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
-    "$CRATES_IO_API_URL/crates/$1")
+  code=$(http "$body" "" "$CRATES_IO_API_URL/crates/$1")
   sleep "$CRATES_IO_API_DELAY"
   case "$code" in
     # Callers run this in a command substitution, where errexit is off, so
@@ -171,8 +210,7 @@ crates_io_name() {
 trustpub_required() {
   local body code value
   body=$(mktemp)
-  code=$(curl -sS -o "$body" -w '%{http_code}' -H "User-Agent: $USER_AGENT" \
-    "$CRATES_IO_API_URL/crates/$1")
+  code=$(http "$body" "" "$CRATES_IO_API_URL/crates/$1")
   sleep "$CRATES_IO_API_DELAY"
   # Not jq -e: false is a valid answer here, and -e would fail on it.
   value=$(jq -r '.crate.trustpub_only' "$body" 2>/dev/null || true)

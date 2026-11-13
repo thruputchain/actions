@@ -39,6 +39,10 @@ retry_after = 0  # seconds from now the 429 says to retry after
 index_lag = {}
 # (name, version) -> index reads left that miss it
 hidden = {}
+# path prefix -> how many of the next requests under it get a 503
+failures = {}
+# crate keys whose next upload is stored but answered with a 503
+lost_replies = set()
 log = []
 
 
@@ -80,6 +84,15 @@ class Handler(BaseHTTPRequestHandler):
     def error(self, code, detail):
         self.reply(code, {"errors": [{"detail": detail}]})
 
+    def unavailable(self, path):
+        """Whether this request is one the tests asked to fail: answers 503."""
+        for prefix, left in failures.items():
+            if path.startswith(prefix) and left > 0:
+                failures[prefix] = left - 1
+                self.error(503, "Service Unavailable")
+                return True
+        return False
+
     def read_json(self):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
@@ -89,6 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         auth = self.headers.get("Authorization")
         log.append(["GET", url.path, auth])
+        if self.unavailable(url.path):
+            return None
         if url.path == "/oidc":
             if auth != "Bearer reqtok" or query.get("audience") != ["crates.io"]:
                 return self.error(401, "bad OIDC request")
@@ -157,6 +172,8 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization")
         body = self.read_json()
         log.append(["POST", url.path, auth, body])
+        if self.unavailable(url.path):
+            return None
         if url.path == "/api/v1/trusted_publishing/tokens":
             if auth is not None or body.get("jwt") != jwt():
                 return self.error(400, "Failed to decode JWT")
@@ -194,6 +211,9 @@ class Handler(BaseHTTPRequestHandler):
             provenance[(body["name"], body["vers"])] = None if token == BOOTSTRAP else {
                 "provider": "github", "repository": claims["repository"],
                 "run_id": "1", "sha": body["sha"]}
+            if k in lost_replies:
+                lost_replies.discard(k)
+                return self.error(503, "Service Unavailable")
             return self.reply(200, {})
         if url.path == "/_test/owner":
             if auth != BOOTSTRAP:
@@ -220,6 +240,9 @@ class Handler(BaseHTTPRequestHandler):
             for name, versions in body.get("hidden", {}).items():
                 for vers, reads in versions.items():
                     hidden[(name, vers)] = reads
+            failures.update(body.get("failures", {}))
+            for name in body.get("lost_replies", []):
+                lost_replies.add(key(name))
             for name in body.get("rate_limited", []):
                 rate_limited.add(key(name))
             retry_after = body.get("retry_after", retry_after)
@@ -235,6 +258,8 @@ class Handler(BaseHTTPRequestHandler):
             rate_limited.clear()
             index_lag.clear()
             hidden.clear()
+            failures.clear()
+            lost_replies.clear()
             retry_after = 0
             reject_patch = False
             log.clear()
@@ -247,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization")
         body = self.read_json()
         log.append(["PATCH", url.path, auth, body])
+        if self.unavailable(url.path):
+            return None
         crate = crates.get(key(url.path.rsplit("/", 1)[1]))
         if not crate:
             return self.error(404, "not found")
