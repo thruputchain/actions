@@ -19,7 +19,7 @@
 # when to retry; default 120), INDEX_LAG_WAIT (first wait, in seconds, before
 # retrying a publish that can't yet see a version this run released; doubles
 # up to 60; default 10) and INDEX_LAG_TIMEOUT (the most it waits for one
-# crate; default 600).
+# crate; default 600). HTTP_ATTEMPTS and HTTP_RETRY_WAIT: see lib.sh.
 # Run tests: bash crates-io-publish/test_crates_io_publish.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,24 +55,37 @@ RELEASED=" "
 
 # Tokens travel in headers read from a file descriptor, never in argv.
 api() { # api <auth-header-value> <curl args...>: prints the body, then the status on its own line
-  local auth="$1"
+  local auth="$1" out code
   shift
-  curl -sS -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" \
-    -H @<(printf 'Authorization: %s\n' "$auth") "$@"
+  out=$(mktemp)
+  code=$(http "$out" "$auth" "$@")
+  cat "$out"
+  rm -f "$out"
+  printf '\n%s\n' "$code"
 }
 status() { tail -n1 <<<"$1"; }
 body() { sed '$d' <<<"$1"; }
 detail() { body "$1" | jq -r '[.errors[]?.detail] | join("; ")' 2>/dev/null || true; }
 
 # A GitHub OIDC token for crates.io. Each is single-use at crates.io.
+# Returns non-zero, printing nothing, when GitHub doesn't hand one over:
+# callers run this in a command substitution, where errexit is off, so
+# every step is checked and an empty token never passes for one.
 github_jwt() {
-  local jwt
+  local body code jwt
   if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
     echo "::error::No GitHub OIDC token available: the job must grant id-token: write" >&2
     return 1
   fi
-  jwt=$(curl -sSf -H @<(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
-    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io" | jq -er .value)
+  body=$(mktemp)
+  code=$(http "$body" "Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=crates.io")
+  if [ "$code" != 200 ] || ! jwt=$(jq -er '.value | strings | select(. != "")' "$body" 2>/dev/null); then
+    rm -f "$body"
+    echo "::error::Could not get a GitHub OIDC token for crates.io: GitHub's token endpoint answered HTTP $code$([ "$code" != 200 ] || echo " without a token")" >&2
+    return 1
+  fi
+  rm -f "$body"
   echo "::add-mask::$jwt" >&2
   echo "$jwt"
 }
@@ -99,7 +112,7 @@ job_environment() {
 OIDC_TOKEN=""
 revoke_oidc() {
   if [ -n "$OIDC_TOKEN" ]; then
-    api "Bearer $OIDC_TOKEN" -o /dev/null -X DELETE "$API/trusted_publishing/tokens" >/dev/null || true
+    http /dev/null "Bearer $OIDC_TOKEN" -X DELETE "$API/trusted_publishing/tokens" >/dev/null || true
     OIDC_TOKEN=""
   fi
 }
@@ -107,15 +120,35 @@ trap revoke_oidc EXIT
 
 # A fresh token per crate: each lives 30 minutes, which a slow verify build
 # or the new-crate rate limit could otherwise outlast.
+#
+# Retries transient failures like http does, but with a new GitHub token for
+# each attempt (the failed one may have used its token up) and the JWT on
+# curl's stdin. Only a refusal of a token crates.io could read (a 4xx) says
+# anything about the crate's trusted publishers.
 exchange_oidc() {
-  local jwt resp
-  jwt=$(github_jwt)
-  # The JWT reaches jq through the environment, not argv.
-  resp=$(JWT="$jwt" jq -n '{jwt: $ENV.JWT}' \
-    | curl -sS -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" -H 'Content-Type: application/json' \
-        --data @- "$API/trusted_publishing/tokens")
-  if [ "$(status "$resp")" != 200 ]; then
-    echo "::error::crates.io refused the trusted publishing exchange (HTTP $(status "$resp")): $(detail "$resp")"
+  local jwt resp code attempt=1 delay="$HTTP_RETRY_WAIT"
+  while true; do
+    jwt=$(github_jwt) || exit 1
+    # The JWT reaches jq through the environment, not argv.
+    resp=$(JWT="$jwt" jq -n '{jwt: $ENV.JWT}' \
+      | curl -sS --connect-timeout 20 --max-time 300 -w '\n%{http_code}' -H "User-Agent: $USER_AGENT" \
+          -H 'Content-Type: application/json' --data @- "$API/trusted_publishing/tokens") || resp=$'\n000'
+    code=$(status "$resp")
+    if ! transient "$code" || [ "$attempt" -ge "$HTTP_ATTEMPTS" ]; then
+      break
+    fi
+    echo "crates.io's trusted publishing exchange failed (HTTP $code, attempt $attempt of $HTTP_ATTEMPTS); retrying in ${delay}s"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  if transient "$code"; then
+    echo "::error::crates.io's trusted publishing exchange kept failing (HTTP $code, $attempt attempts): $(detail "$resp")"
+    echo "::error::Nothing suggests the trusted publisher is misconfigured; re-run the job to resume the release"
+    exit 1
+  fi
+  if [ "$code" != 200 ]; then
+    echo "::error::crates.io refused the trusted publishing exchange (HTTP $code): $(detail "$resp")"
     echo "::error::Add $GITHUB_REPOSITORY, workflow $WORKFLOW_FILE as a trusted publisher on crates.io, or pass bootstrap-token so this action adds it"
     exit 1
   fi
@@ -129,7 +162,7 @@ exchange_oidc() {
 # environment accepts only jobs in it, compared case-insensitively. Returns
 # non-zero on failure.
 ensure_trusted_publisher() {
-  local crate="$1" resp
+  local crate="$1" resp config
   if ! job_environment; then
     echo "::warning::Could not read this job's environment from its GitHub OIDC token"
     return 1
@@ -147,12 +180,12 @@ ensure_trusted_publisher() {
     echo "OK: $crate already trusts $GITHUB_REPOSITORY $WORKFLOW_FILE${ENVIRONMENT:+ in $ENVIRONMENT}"
     return 0
   fi
-  resp=$(jq -n --arg c "$crate" --arg o "$REPO_OWNER" --arg r "$REPO_NAME" --arg w "$WORKFLOW_FILE" \
+  config=$(jq -n --arg c "$crate" --arg o "$REPO_OWNER" --arg r "$REPO_NAME" --arg w "$WORKFLOW_FILE" \
       --arg e "$ENVIRONMENT" \
       '{github_config: {crate: $c, repository_owner: $o, repository_name: $r, workflow_filename: $w,
-        environment: (if $e == "" then null else $e end)}}' \
-    | api "$BOOTSTRAP_TOKEN" -X POST -H 'Content-Type: application/json' --data @- \
-        "$API/trusted_publishing/github_configs")
+        environment: (if $e == "" then null else $e end)}}')
+  resp=$(api "$BOOTSTRAP_TOKEN" -X POST -H 'Content-Type: application/json' --data "$config" \
+    "$API/trusted_publishing/github_configs")
   if [ "$(status "$resp")" != 200 ]; then
     echo "::warning::Could not add $GITHUB_REPOSITORY $WORKFLOW_FILE as trusted publisher of $crate (HTTP $(status "$resp")): $(detail "$resp")"
     return 1
@@ -165,9 +198,8 @@ ensure_trusted_publisher() {
 # publishers can release it. Returns non-zero on failure.
 require_trusted_publishing() {
   local crate="$1" resp
-  resp=$(jq -n '{crate: {trustpub_only: true}}' \
-    | api "$BOOTSTRAP_TOKEN" -X PATCH -H 'Content-Type: application/json' --data @- \
-        "$API/crates/$crate")
+  resp=$(api "$BOOTSTRAP_TOKEN" -X PATCH -H 'Content-Type: application/json' \
+    --data '{"crate": {"trustpub_only": true}}' "$API/crates/$crate")
   if [ "$(status "$resp")" != 200 ]; then
     echo "::warning::Could not require trusted publishing for $crate (HTTP $(status "$resp")): $(detail "$resp")"
     return 1
@@ -214,11 +246,17 @@ lagging_dependency() {
 # lagging_dependency) waits for the index to catch up and retries, with
 # backoff, for up to INDEX_LAG_TIMEOUT seconds in all. cargo resolves before
 # it uploads, so the failed attempt uploaded nothing.
+#
+# A 5xx answer to the upload doesn't say whether crates.io took the crate,
+# so it is never simply retried: after a wait, crates.io is asked for the
+# version. If it has it (from this commit, as for any version found there),
+# the crate is published; if it doesn't, the publish is tried again, up to
+# 3 times. Any other failure of cargo publish ends the run, as before.
 # --registry: a [registry] default elsewhere must not redirect it.
 publish() { # publish <package> <token>
   local pkg="$1" token="$2" attempt=1 output rc retry_at retry_epoch delay dep
-  local lag_delay="$INDEX_LAG_WAIT" lag_waited=0
-  # attempt counts 429s only: index waits have their own bound.
+  local lag_delay="$INDEX_LAG_WAIT" lag_waited=0 errors=0 code
+  # attempt counts 429s only: index waits and server errors have their own bounds.
   while true; do
     rc=0
     # shellcheck disable=SC2086 # PUBLISH_ARGS is a list of flags
@@ -256,6 +294,33 @@ publish() { # publish <package> <token>
       lag_waited=$((lag_waited + delay))
       lag_delay=$((lag_delay * 2 > 60 ? 60 : lag_delay * 2))
       continue
+    fi
+    if grep -qE '\(status 5[0-9][0-9]|200 OK response, got 5[0-9][0-9]' <<<"$output" && [ "$errors" -lt 3 ]; then
+      errors=$((errors + 1))
+      delay=$((HTTP_RETRY_WAIT * 5 * errors))
+      echo "crates.io answered the upload of $pkg with a server error (attempt $errors); checking in ${delay}s whether it has $pkg@$VERSION"
+      sleep "$delay"
+      # The API, not the index, which can trail a publish.
+      code=$(http /dev/null "" "$API/crates/$pkg/$VERSION")
+      sleep "$CRATES_IO_API_DELAY"
+      case "$code" in
+        200)
+          if ! published_from "$pkg" "$VERSION" "$(git rev-parse HEAD)"; then
+            echo "::error::crates.io's $pkg@$VERSION isn't the one $GIT_TAG releases: check who published it"
+            exit 1
+          fi
+          echo "OK: published $pkg (crates.io has $pkg@$VERSION despite the error)"
+          return 0
+          ;;
+        404)
+          echo "crates.io doesn't have $pkg@$VERSION; publishing it again"
+          continue
+          ;;
+        *)
+          echo "::error::Could not tell whether crates.io has $pkg@$VERSION after the failed upload (HTTP $code); re-run the job to resume the release"
+          exit 1
+          ;;
+      esac
     fi
     echo "::error::Failed to publish $pkg"
     exit 1

@@ -85,6 +85,20 @@ because cargo resolves dependencies first. If the version still doesn't appear, 
 and names the missing crate and version, and re-running the job resumes the release. Any other
 resolution failure fails at once, including a dependency listed after the crate in `packages`.
 
+### Transient failures
+
+Every request the action makes itself (GitHub's OIDC token endpoint, the crates.io API, index
+and downloads, the trusted publishing token exchange) is retried when it fails in transit or
+gets a 429 or 5xx: up to 6 attempts, waiting 2s and then doubling, about a minute in all. Any
+other 4xx is an answer and isn't retried. If GitHub never hands over an OIDC token, the run
+fails saying so and sends crates.io nothing; the hint to add a trusted publisher is printed only
+when crates.io refused a token it could read.
+
+A 5xx answer to `cargo publish` doesn't say whether crates.io took the crate, so the action
+asks crates.io for the version after a wait. If it's there, published from this commit, the
+crate counts as published; if not, the publish is tried again, up to 3 times. Any other
+`cargo publish` failure fails the run, and re-running the job resumes the release.
+
 ## Usage
 
 ```yaml

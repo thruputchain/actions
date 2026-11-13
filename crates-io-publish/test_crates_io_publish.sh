@@ -18,7 +18,7 @@ for _ in $(seq 50); do [ -s "$TMP/port" ] && break; sleep 0.1; done
 MOCK="http://127.0.0.1:$(cat "$TMP/port")"
 
 export CRATES_IO_API_URL="$MOCK/api/v1" CRATES_IO_INDEX_URL="$MOCK/index" CRATES_IO_DL_URL="$MOCK/dl"
-export CRATES_IO_API_DELAY=0 RATE_LIMIT_WAIT=0 CARGO_NET_OFFLINE=true
+export CRATES_IO_API_DELAY=0 RATE_LIMIT_WAIT=0 HTTP_RETRY_WAIT=0 CARGO_NET_OFFLINE=true
 export GITHUB_REPOSITORY=o/r GITHUB_WORKFLOW_REF="o/r/.github/workflows/publish.yml@refs/heads/main"
 export ACTIONS_ID_TOKEN_REQUEST_URL="$MOCK/oidc?x=1" ACTIONS_ID_TOKEN_REQUEST_TOKEN=reqtok
 
@@ -74,6 +74,13 @@ case "\$1" in
         echo
         echo "Caused by:"
         echo "  the remote server responded with an error (status 429 Too Many Requests): \$(jq -r '.errors[0].detail' "$TMP/stub-response")"
+        exit 101
+        ;;
+      5??)
+        echo "error: failed to publish to registry at https://crates.io"
+        echo
+        echo "Caused by:"
+        echo "  the remote server responded with an error (status \$code Service Unavailable): \$(jq -r '.errors[0].detail' "$TMP/stub-response")"
         exit 101
         ;;
       *) echo "error: failed to publish (HTTP \$code)"; exit 101 ;;
@@ -349,6 +356,118 @@ check "failing to require trusted publishing fails the run" "exit 1" "$(result "
 check "... once both crates are published" '["0.2.2"] ["0.1.0","0.2.2"]' \
   "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
 check "... naming the setting to tick for each crate" 2 "$(grep -c 'still accepts new versions published with API tokens' "$TMP/last.log" || true)"
+
+# ---- transient failures ----
+# Both crates exist with this job as their trusted publisher, and 0.2.2 is
+# tagged: an OIDC-only release, as most are.
+PUBLISHER='{"repository_owner": "o", "repository_name": "r", "workflow_filename": "publish.yml", "environment": null}'
+flaky_reset() { # flaky_reset <failures>: path prefix -> requests to answer with a 503
+  reset
+  mock seed "$(jq -n --argjson p "$PUBLISHER" --argjson f "$1" '{crates: {"zz-new": ["0.2.1"], "zz-old": ["0.2.1"]},
+    configs: [$p + {crate: "zz-new"}, $p + {crate: "zz-old"}], failures: $f}')"
+}
+flaky_run() { run publish GIT_TAG=v0.2.2 "$@"; }
+requests() { state "[.log[] | select(.[0] == \"$1\" and (.[1] | startswith(\"$2\")))] | length"; }
+HINT='as a trusted publisher on crates.io, or pass bootstrap-token'
+
+# GitHub's OIDC token endpoint answers 503 once: the release goes on.
+flaky_reset '{"/oidc": 1}'
+r=$(flaky_run)
+check "a 503 from GitHub's OIDC token endpoint is retried" "exit 0" "$(result "$r")"
+check "... once, saying so" 1 "$(grep -c 'oidc failed (HTTP 503, attempt 1 of 6); retrying in 0s' "$TMP/last.log" || true)"
+check "... and both crates are published" '["0.2.1","0.2.2"] ["0.2.1","0.2.2"]' \
+  "$(state '.crates["zz-new"].versions') $(state '.crates["zz-old"].versions')"
+check "... never sending crates.io an empty token" 0 \
+  "$(state '[.log[] | select(.[0] == "POST" and .[1] == "/api/v1/trusted_publishing/tokens" and (.[3].jwt // "") == "")] | length')"
+
+# It never recovers: the run stops there, without bothering crates.io.
+flaky_reset '{"/oidc": 1000}'
+r=$(flaky_run HTTP_ATTEMPTS=3)
+check "an OIDC token endpoint that stays down fails the run" "exit 1" "$(result "$r")"
+check "... after HTTP_ATTEMPTS requests" 3 "$(requests GET /oidc)"
+check "... as a missing GitHub token" 1 \
+  "$(grep -c "::error::Could not get a GitHub OIDC token for crates.io: GitHub's token endpoint answered HTTP 503" "$TMP/last.log" || true)"
+check "... without asking crates.io to exchange one" 0 "$(requests POST /api/v1/trusted_publishing/tokens)"
+check "... or blaming the trusted publisher" "0 0" \
+  "$(grep -c "$HINT" "$TMP/last.log" || true) $(grep -c 'refused the trusted publishing exchange' "$TMP/last.log" || true)"
+check "... or publishing anything" '["0.2.1"]' "$(state '.crates["zz-new"].versions')"
+
+# A token endpoint that answers 200 with no token is no token either.
+flaky_reset '{}'
+r=$(flaky_run ACTIONS_ID_TOKEN_REQUEST_URL="$MOCK/_test/state?x=1")
+check "a 200 without a token fails the run" "exit 1 1" \
+  "$(result "$r") $(grep -c 'answered HTTP 200 without a token' "$TMP/last.log" || true)"
+check "... without asking crates.io to exchange one" 0 "$(requests POST /api/v1/trusted_publishing/tokens)"
+
+# The exchange itself answers 503: retried, with a new GitHub token each time.
+flaky_reset '{"/api/v1/trusted_publishing/tokens": 2}'
+r=$(flaky_run PACKAGES=zz-new)
+check "a 503 from the crates.io token exchange is retried" "exit 0" "$(result "$r")"
+check "... with a fresh GitHub token per attempt" "3 3" "$(requests POST /api/v1/trusted_publishing/tokens) $(requests GET /oidc)"
+flaky_reset '{"/api/v1/trusted_publishing/tokens": 1000}'
+r=$(flaky_run HTTP_ATTEMPTS=2)
+check "a token exchange that stays down fails the run" "exit 1 2" "$(result "$r") $(requests POST /api/v1/trusted_publishing/tokens)"
+check "... as an outage, not a missing trusted publisher" "1 0" \
+  "$(grep -c "::error::crates.io's trusted publishing exchange kept failing (HTTP 503, 2 attempts)" "$TMP/last.log" || true) $(grep -c "$HINT" "$TMP/last.log" || true)"
+
+# A refusal is an answer: not retried, and it gets the setup hint.
+reset
+mock seed '{"crates": {"zz-new": ["0.2.1"]}}'
+r=$(flaky_run PACKAGES=zz-new)
+check "a refused token exchange fails at once" "exit 1 1" "$(result "$r") $(requests POST /api/v1/trusted_publishing/tokens)"
+check "... with the trusted publisher hint" "1 1" \
+  "$(grep -c 'refused the trusted publishing exchange (HTTP 400): No Trusted Publishing config found' "$TMP/last.log" || true) $(grep -c "$HINT" "$TMP/last.log" || true)"
+
+# Lookups: the index and the API are retried, in check mode too; a 404 isn't.
+flaky_reset '{"/index/": 2, "/api/v1/crates/": 2}'
+r=$(flaky_run)
+check "503s from the index and the API are retried" "exit 0 4" \
+  "$(result "$r") $(grep -c 'failed (HTTP 503, attempt [0-9] of 6); retrying' "$TMP/last.log" || true)"
+flaky_reset '{"/index/": 1000}'
+r=$(flaky_run HTTP_ATTEMPTS=2)
+check "an index that stays down fails the run" "exit 1 1" \
+  "$(result "$r") $(grep -c "::error::crates.io index probe for 'zz-new' failed (HTTP 503)" "$TMP/last.log" || true)"
+check "... publishing nothing" '["0.2.1"]' "$(state '.crates["zz-new"].versions')"
+flaky_reset '{"/api/v1/crates/": 1}'
+mock seed '{"trustpub_only": ["zz-new", "zz-old"]}'
+r=$(run check)
+check "check mode retries too" "exit 0 true" "$(result "$r") $(output "$r" release)"
+reset
+r=$(run check BOOTSTRAP_TOKEN=boot PACKAGES=zz-new)
+check "a 404 is an answer, asked for once" "exit 0 1" "$(result "$r") $(requests GET /api/v1/crates/zz-new)"
+r=$(flaky_run CRATES_IO_INDEX_URL=http://127.0.0.1:1/index HTTP_ATTEMPTS=2)
+check "a refused connection is retried, then fails the run" "exit 1 1 1" \
+  "$(result "$r") $(grep -c 'failed (HTTP 000, attempt 1 of 2); retrying' "$TMP/last.log" || true) $(grep -c "index probe for 'zz-new' failed (HTTP 000)" "$TMP/last.log" || true)"
+
+# Setting up trusted publishing with the bootstrap token survives 503s.
+reset
+mock seed '{"failures": {"/api/v1/trusted_publishing/github_configs": 3, "/api/v1/crates/zz-new": 1}}'
+r=$(flaky_run BOOTSTRAP_TOKEN=boot PACKAGES=zz-new)
+check "503s while registering the publisher and requiring it are retried" "exit 0 1 true" \
+  "$(result "$r") $(state '.crates["zz-new"].configs | length') $(state '.crates["zz-new"].trustpub_only // false')"
+
+# cargo publish gets a 503. Nothing was stored: published again, once.
+uploads() { state "[.log[] | select(.[1] == \"/_test/publish\" and .[3].name == \"$1\")] | length"; }
+flaky_reset '{"/_test/publish": 1}'
+r=$(flaky_run PACKAGES=zz-new)
+check "a 503 to an upload crates.io didn't keep is published again" "exit 0 2" "$(result "$r") $(uploads zz-new)"
+check "... after finding the version missing" 1 "$(grep -c "crates.io doesn't have zz-new@0.2.2; publishing it again" "$TMP/last.log" || true)"
+# The crate was stored and only the answer was lost: not uploaded twice.
+flaky_reset '{}'
+mock seed '{"lost_replies": ["zz-new"]}'
+r=$(flaky_run PACKAGES=zz-new)
+check "a 503 to an upload crates.io kept counts as published" "exit 0 1" "$(result "$r") $(uploads zz-new)"
+check "... saying so" 1 "$(grep -c '^OK: published zz-new (crates.io has zz-new@0.2.2 despite the error)' "$TMP/last.log" || true)"
+check "... with the OIDC token revoked" '{}' "$(state .oidc_tokens)"
+flaky_reset '{"/_test/publish": 1000}'
+r=$(flaky_run PACKAGES=zz-new)
+check "uploads that keep getting 503s fail the run" "exit 1 4" "$(result "$r") $(uploads zz-new)"
+check "... as a failed publish" 1 "$(grep -c '::error::Failed to publish zz-new' "$TMP/last.log" || true)"
+# Other publish failures are still final.
+reset
+mock seed '{"crates": {"zz-new": ["0.2.1"], "zz-old": ["0.2.1"]}, "configs": ['"$(jq -c '. + {crate: "zz-old"}' <<<"$PUBLISHER")"']}'
+r=$(flaky_run PACKAGES=zz-new)
+check "a publish crates.io refuses isn't retried" "exit 1 1" "$(result "$r") $(uploads zz-new)"
 
 # ---- index lag ----
 # zz-dep depends on zz-new, so publishing it resolves zz-new@0.3.0 against
