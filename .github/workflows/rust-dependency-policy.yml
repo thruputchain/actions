@@ -180,6 +180,7 @@ jobs:
             echo "::group::$manifest"
             # shellcheck disable=SC2086
             if ! cargo deny --manifest-path "$manifest" --all-features \
+                --config "deny.toml" \
                 --locked check $CHECKS; then
               echo "::error file=$manifest::dependency policy check failed"
               status=1
