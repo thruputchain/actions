@@ -169,14 +169,7 @@ jobs:
           # Graph flags must precede the subcommand; cargo-deny rejects them
           # after it. CHECKS is unquoted on purpose: empty must expand to no
           # argument at all, which is how cargo-deny runs every check.
-          # Every workspace is checked before failing, so one run reports all
-          # of them. cargo-deny reads ./deny.toml whatever the manifest.
-          # All of the input, split on spaces, tabs, and newlines: a YAML
-          # block may list one manifest per line. Reading to end of input
-          # returns 1.
           read -r -d '' -a extra <<< "$MANIFEST_PATHS" || true
-          # The root workspace is always checked, so drop it from the extras
-          # if listed there too.
           manifests=(Cargo.toml)
           for manifest in "${extra[@]}"; do
             case "$manifest" in
