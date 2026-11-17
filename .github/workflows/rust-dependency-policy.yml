@@ -175,8 +175,17 @@ jobs:
           # block may list one manifest per line. Reading to end of input
           # returns 1.
           read -r -d '' -a extra <<< "$MANIFEST_PATHS" || true
+          # The root workspace is always checked, so drop it from the extras
+          # if listed there too.
+          manifests=(Cargo.toml)
+          for manifest in "${extra[@]}"; do
+            case "$manifest" in
+              Cargo.toml | ./Cargo.toml) ;;
+              *) manifests+=("$manifest") ;;
+            esac
+          done
           status=0
-          for manifest in Cargo.toml "${extra[@]}"; do
+          for manifest in "${manifests[@]}"; do
             echo "::group::$manifest"
             # shellcheck disable=SC2086
             if ! cargo deny --manifest-path "$manifest" --all-features \
