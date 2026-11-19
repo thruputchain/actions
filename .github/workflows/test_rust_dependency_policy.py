@@ -34,7 +34,9 @@ OTHER_URLS = [
     "https://github.com/other/dep.git",
 ]
 
+# Called as `cargo deny --manifest-path <path> ...`, once per manifest.
 FAKE_CARGO = """#!/bin/sh
+echo "manifest=$3"
 echo "fetch-with-cli=${CARGO_NET_GIT_FETCH_WITH_CLI:-}"
 for url in $URLS; do
   echo "$url $(git ls-remote --get-url "$url")"
@@ -64,13 +66,15 @@ class GitTokenTests(unittest.TestCase):
     def step(self, name):
         return next(step for step in self.steps if step["name"] == name)
 
-    def run_check(self, token):
+    def run_check(self, token, manifest_paths=""):
         """Runs the check step with the fake cargo and returns, per URL,
-        what git fetches instead, plus CARGO_NET_GIT_FETCH_WITH_CLI."""
+        what git fetches instead, CARGO_NET_GIT_FETCH_WITH_CLI, and the
+        manifests checked, in order."""
         step = self.step("Check dependency policy")
         bindings = {
             "${{ inputs.toolchain }}": "stable",
             "${{ inputs.checks }}": "",
+            "${{ inputs.manifest-paths }}": manifest_paths,
             "${{ inputs.registry-name }}": "",
             "${{ secrets.registry-token }}": "",
             "${{ steps.git-app-token.outputs.token }}": token,
@@ -97,27 +101,41 @@ class GitTokenTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        lines = result.stdout.splitlines()
-        fetch_with_cli = lines[0].split("=", 1)[1]
-        fetched = dict(line.split(" ", 1) for line in lines[1:])
-        return fetched, fetch_with_cli
+        # Skip workflow commands such as ::group::.
+        lines = [l for l in result.stdout.splitlines() if not l.startswith("::")]
+        manifests = [l.split("=", 1)[1] for l in lines if l.startswith("manifest=")]
+        fetch_with_cli = next(
+            l.split("=", 1)[1] for l in lines if l.startswith("fetch-with-cli=")
+        )
+        fetched = dict(l.split(" ", 1) for l in lines if " " in l)
+        return fetched, fetch_with_cli, manifests
 
     def test_owner_urls_fetch_with_token(self):
-        fetched, fetch_with_cli = self.run_check(TOKEN)
+        fetched, fetch_with_cli, _ = self.run_check(TOKEN)
         self.assertEqual(fetch_with_cli, "true")
         for url in OWNER_URLS:
             self.assertEqual(fetched[url], WITH_TOKEN, url)
 
     def test_other_urls_untouched(self):
-        fetched, _ = self.run_check(TOKEN)
+        fetched, _, _ = self.run_check(TOKEN)
         for url in OTHER_URLS:
             self.assertEqual(fetched[url], url)
 
     def test_no_token_no_rewrite(self):
-        fetched, fetch_with_cli = self.run_check("")
+        fetched, fetch_with_cli, _ = self.run_check("")
         self.assertEqual(fetch_with_cli, "")
         for url in OWNER_URLS + OTHER_URLS:
             self.assertEqual(fetched[url], url)
+
+    def test_root_manifest_only_by_default(self):
+        _, _, manifests = self.run_check("")
+        self.assertEqual(manifests, ["Cargo.toml"])
+
+    def test_manifest_paths_checked_after_root_once(self):
+        _, _, manifests = self.run_check(
+            "", "a/Cargo.toml Cargo.toml\n  b/Cargo.toml\n./Cargo.toml\n"
+        )
+        self.assertEqual(manifests, ["Cargo.toml", "a/Cargo.toml", "b/Cargo.toml"])
 
     def test_guard_stops_a_token_for_the_whole_installation(self):
         names = [step["name"] for step in self.steps]

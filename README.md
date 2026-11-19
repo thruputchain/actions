@@ -191,6 +191,14 @@ GitHub App for private git dependencies under the caller's owner: `git-app-id` a
 `git-repositories`. The App's installation must cover those repositories; the token reads only them.
 `python3 .github/workflows/test_rust_dependency_policy.py` tests that input check and URL rewrite offline.
 
+The root workspace is always checked. To check other workspaces with their own lockfiles,
+list their manifests in `manifest-paths`; the root `deny.toml` applies to each:
+
+```yaml
+    with:
+      manifest-paths: tools/runner/Cargo.toml
+```
+
 ```yaml
 jobs:
   dependency-policy:
